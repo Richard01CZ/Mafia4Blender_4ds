@@ -3,12 +3,15 @@ import os
 import bpy # type: ignore
 import bmesh # type: ignore
 import struct
+import re
+import math
 from mathutils import Quaternion, Matrix, Vector # type: ignore
 from bpy_extras.io_utils import ImportHelper, ExportHelper # type: ignore
 from bpy.props import StringProperty, EnumProperty, IntProperty, FloatProperty, FloatVectorProperty, BoolProperty # type: ignore
+from bpy.types import AddonPreferences # type: ignore
 bl_info = {
     "name": "LS3D 4DS Importer/Exporter",
-    "author": "Sev3n, Richard01_CZ, Grok 3 AI, Google Gemini 3 Pro Preview, ChatGPT 5.2",
+    "author": "Sev3n, Richard01_CZ, Grok 4 AI, Google Gemini 3 Pro Preview, ChatGPT 5.2",
     "version": (0, 0, 1, 'preview' ),
     "blender": (5, 0, 1),
     "location": "File > Import/Export > 4DS Model File",
@@ -21,64 +24,104 @@ VERSION_HD2 = 41
 VERSION_CHAMELEON = 42
 
 # Frame Types
-FRAME_VISUAL = 1
-FRAME_LIGHT = 2
+FRAME_VISUAL = 1        # 3D Object                 COMPLETE ?
+FRAME_LIGHT = 2         # UNUSPPORTED
 FRAME_CAMERA = 3
 FRAME_SOUND = 4
-FRAME_SECTOR = 5
-FRAME_DUMMY = 6
-FRAME_TARGET = 7
-FRAME_USER = 8
-FRAME_MODEL = 9
-FRAME_JOINT = 10
-FRAME_VOLUME = 11
-FRAME_OCCLUDER = 12
-FRAME_SCENE = 13
-FRAME_AREA = 14
-FRAME_LANDSCAPE = 15
+FRAME_SECTOR = 5        # 3D Object Wireframe       ADD OPTION TO MAKE A CONVEX HULL, CHECK IF SECTOR IS CONVEX HULL BEFORE EXPORT, IF NOT, SHOW ERROR AND DENY EXPORT - (create a 4ds panel into N tool panel)
+FRAME_DUMMY = 6         # Empty (Cube)
+FRAME_TARGET = 7        # Empty (Plain Axis)
+FRAME_USER = 8          # HD2
+FRAME_MODEL = 9         # Empty (Arrows)            TO DO
+FRAME_JOINT = 10        # Armature/Bones            TO DO
+FRAME_VOLUME = 11       # HD2
+FRAME_OCCLUDER = 12     # 3D Object Wireframe       ADD OPTION TO MAKE A CONVEX HULL, CHECK IF OCCLUDER IS CONVEX HULL BEFORE EXPORT, IF NOT, SHOW ERROR AND DENY EXPORT (add a 4ds Item into N tool panel)
+FRAME_SCENE = 13        # HD2
+FRAME_AREA = 14         # HD2
+FRAME_LANDSCAPE = 15    # HD2
+
+# also add a "portals must be flat polygons, they cannot deviate, they have to be absolutely flat plane, max vertices are 32 (i think it needs to be an N-gon so only the perimeter vertices matter)
+
+# Add an option to show or hide the raw int values in 4ds side panels
+# //postponed - update smoothsahding to import and export stuff correctly / are we importing the mesh correctly? did we miss something such as seam markers, sharp corner markers?
+# Check if bones and weights are being imported and exported correctly using max4dstools or mafia_5ds on github as a reference
+# Check how 6DS files work to see if we can add custom Shadow Models
+# make sure we also export shape keys correctly
+# also make sure we stop export and display a visual error box to the user if occluder or sector aren't correct geometry (convex hull) and also if there are more than 32 vertices of a portal, we also stop export and display an error box to the user. 
+# All error boxes have to contain object name and reason for export interference.
+
+
+# Map vehicle dummies and create N panel with all dummy types for a specific thing of the vehicle.
 
 # Visual Types
-VISUAL_OBJECT = 0
-VISUAL_LITOBJECT = 1
-VISUAL_SINGLEMESH = 2
-VISUAL_SINGLEMORPH = 3
-VISUAL_BILLBOARD = 4
-VISUAL_MORPH = 5
-VISUAL_LENS = 6
-VISUAL_PROJECTOR = 7
-VISUAL_MIRROR = 8
-VISUAL_EMITOR = 9
-VISUAL_SHADOW = 10
-VISUAL_LANDPATCH = 11
+VISUAL_OBJECT = 0           # COMPLETE ?
+VISUAL_LITOBJECT = 1        # TO DO
+VISUAL_SINGLEMESH = 2       # TO DO
+VISUAL_SINGLEMORPH = 3      # TO DO
+VISUAL_BILLBOARD = 4        # COMPLETE
+VISUAL_MORPH = 5            # TO DO
+VISUAL_LENS = 6             # TO DO
+VISUAL_PROJECTOR = 7        # UNSUPPORTED
+VISUAL_MIRROR = 8           # TO DO
+VISUAL_EMITOR = 9           # UNSUPPORTED
 
 # Material Flags (Full 32-bit map)
-MTL_MISC_UNLIT            = 0x00000001 # Bit 0
-MTL_ENV_OVERLAY           = 0x00000100 # Bit 8
-MTL_ENV_MULTIPLY          = 0x00000200 # Bit 9
-MTL_ENV_ADDITIVE          = 0x00000400 # Bit 10
-MTL_ENV_DISABLE_TEX       = 0x00000800 # Bit 11
-MTL_ENV_PROJECT_Y         = 0x00001000 # Bit 12
-MTL_ENV_DETERMINED_Y      = 0x00002000 # Bit 13
-MTL_ENV_DETERMINED_Z      = 0x00004000 # Bit 14
-MTL_ENV_ADDEFFECT         = 0x00008000 # Bit 15
+MTL_MISC_UNLIT              = 0x00000001
+MTL_ENV_OVERLAY             = 0x00000100
+MTL_ENV_MULTIPLY            = 0x00000200
+MTL_ENV_ADDITIVE            = 0x00000400
+MTL_ENVTEX                  = 0x00000800
+MTL_ALPHA_ENABLE            = 0x00008000
+MTL_DISABLE_U_TILING        = 0x00010000
+MTL_DISABLE_V_TILING        = 0x00020000
+MTL_DIFFUSE_ENABLE          = 0x00040000
+MTL_ENV_ENABLE              = 0x00080000
+MTL_ENV_PROJY               = 0x00001000
+MTL_ENV_DETAILY             = 0x00002000
+MTL_ENV_DETAILZ             = 0x00004000
+MTL_UNKNOWN_20              = 0x00100000
+MTL_UNKNOWN_21              = 0x00200000
+MTL_UNKNOWN_22              = 0x00400000
+MTL_DIFFUSE_MIPMAP          = 0x00800000
+MTL_ALPHA_IN_TEX            = 0x01000000
+MTL_ALPHA_ANIMATED          = 0x02000000
+MTL_DIFFUSE_ANIMATED        = 0x04000000
+MTL_DIFFUSE_COLORED         = 0x08000000
+MTL_DIFFUSE_DOUBLESIDED     = 0x10000000
+MTL_ALPHA_COLORKEY          = 0x20000000
+MTL_ALPHATEX                = 0x40000000
+MTL_ALPHA_ADDITIVE          = 0x80000000
 
-# High Word Flags (Standard)
-MTL_DISABLE_U_TILING      = 0x00010000 # Bit 16
-MTL_DISABLE_V_TILING      = 0x00020000 # Bit 17
-MTL_DIFFUSETEX            = 0x00040000 # Bit 18
-MTL_ENVMAP                = 0x00080000 # Bit 19
-MTL_CALCREFLECTTEXY       = 0x00100000 # Bit 20 (Wet Roads)
-MTL_PROJECTREFLECTTEXY    = 0x00200000 # Bit 21
-MTL_PROJECTREFLECTTEXZ    = 0x00400000 # Bit 22
-MTL_MIPMAP                = 0x00800000 # Bit 23
-MTL_ALPHA_IN_TEX          = 0x01000000 # Bit 24 (Image Alpha)
-MTL_ANIMATED_ALPHA        = 0x02000000 # Bit 25
-MTL_ANIMATED_DIFFUSE      = 0x04000000 # Bit 26
-MTL_COLORED               = 0x08000000 # Bit 27 (Vertex Color)
-MTL_DOUBLESIDED           = 0x10000000 # Bit 28
-MTL_COLORKEY              = 0x20000000 # Bit 29
-MTL_ALPHA                 = 0x40000000 # Bit 30
-MTL_ADDITIVE              = 0x80000000 # Bit 31
+# --- VISUAL RENDER FLAGS (Byte 1) ---
+RF_CAST_SHADOW      = 1 << 0  # 1   - Object casts a dynamic shadow.
+RF_RECEIVE_SHADOW   = 1 << 1  # 2   - Object receives shadows cast by other objects.
+RF_DRAW_LAST        = 1 << 2  # 4   - Rendered after opaque geometry (Required for alpha blending/transparency).
+RF_ZBIAS            = 1 << 3  # 8   - Applies a small depth offset to prevent Z-fighting (flickering) on decals.
+RF_BRIGHT           = 1 << 4  # 16  - Unlit/Fullbright. Ignores scene lighting (always fully illuminated).
+RF_WIRE_BOUND       = 1 << 5  # 32  - Hidden/Collision Only. Object is invisible in-game but physically active.
+RF_UNUSED_6         = 1 << 6  # 64  - Unknown/Unused.
+RF_UNUSED_7         = 1 << 7  # 128 - Unknown/Unused.
+
+# --- VISUAL LOGIC FLAGS (Byte 2) ---
+LF_DECAL            = 1 << 0  # 1   - Treats mesh as a surface decal optimization.
+LF_STENCIL          = 1 << 1  # 2   - Enables stencil buffer operations (used for stencil shadow volumes).
+LF_MIRROR           = 1 << 2  # 4   - Surface acts as a real-time planar mirror (Performance heavy).
+LF_FADE_OUT         = 1 << 3  # 8   - Object fades out transparently at max distance instead of popping out.
+LF_2D               = 1 << 4  # 16  - Renders as 2D overlay. Disables Z-buffer depth check (draws on top).
+LF_PROJECTOR        = 1 << 5  # 32  - Mesh behaves as a texture projector (e.g., car headlights).
+LF_SOUND_OCCLUDER   = 1 << 6  # 64  - Geometry acts as a physical barrier for sound, muffling audio behind it.
+LF_NO_FOG           = 1 << 7  # 128 - Object is unaffected by scene fog (used for Skyboxes/Horizons).
+
+class LS3D_AddonPreferences(bpy.types.AddonPreferences):
+    bl_idname = __name__
+
+    textures_path: StringProperty(name="Path to Textures", description='Path to the textures "maps" folder. This path is used by the importer.', subtype='DIR_PATH', default=r"D:/Hry/Mafia Editovani/maps") # type: ignore / drž píču už, funguješ
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="LS3D Configuration", icon='SETTINGS')
+        layout.prop(self, "textures_path")
+
 
 class The4DSPanel(bpy.types.Panel):
     bl_label = "4DS Object Properties"
@@ -90,268 +133,323 @@ class The4DSPanel(bpy.types.Panel):
     def draw(self, context):
         obj = context.object
         layout = self.layout
-        if not obj: return
-
-        if obj.type == 'MESH':
-            layout.prop(obj, "visual_type", text="Mesh Type")
-        layout.separator()
         
-        # --- RENDER FLAGS ---
-        if obj.type == 'MESH':
+        # Global Scene Settings
+        box = layout.box()
+        box.label(text="Scene Settings", icon='SCENE_DATA')
+        box.prop(context.scene, "ls3d_is_animated")
+        
+        if not obj: return
+        
+        layout.separator()
+        layout.prop(obj, "ls3d_frame_type", text="Frame Type")
+        current_type = obj.ls3d_frame_type
+        
+        # --- DETECT IF PORTAL ---
+        # Strictly checks: 
+        # 1. Object is Type 5 (Sector)
+        # 2. Parent exists and is Type 5 (Sector)
+        # 3. Name ends with _portal<number>
+        is_portal = False
+        
+        if current_type == '5': # Rule 1: Object must be a Sector Frame
+            if obj.parent:
+                parent_type = getattr(obj.parent, "ls3d_frame_type", '1')
+                if parent_type == '5': # Rule 2: Parent must be a Sector
+                    # Rule 3: Check suffix (e.g., Room_portal1)
+                    if re.search(r"_portal\d+$", obj.name, re.IGNORECASE):
+                        is_portal = True
+
+        # =========================================================
+        # DRAW LOGIC
+        # =========================================================
+
+        # --- CASE A: PORTAL (Strict Logic) ---
+        if is_portal:
             box = layout.box()
-            box.label(text="Render Flags 1 (Visual)", icon='RESTRICT_RENDER_OFF')
+            box.label(text="Portal Config", icon='OUTLINER_OB_LIGHT')
             
+            # Raw Int
+            box.prop(obj, "ls3d_portal_flags", text="Raw Flags (Int)")
+            
+            # Values
+            row = box.row(align=True)
+            row.prop(obj, "ls3d_portal_near", text="Near")
+            row.prop(obj, "ls3d_portal_far", text="Far")
+            
+            # Flags
+            box.label(text="Flags:")
+            grid = box.grid_flow(row_major=True, columns=2, align=True)
+            grid.prop(obj, "pf_bit0", text="(Active)") 
+            grid.prop(obj, "pf_bit1", text="Bit 1")
+            grid.prop(obj, "pf_enabled", text="Bit 2 (Possible Active flag)") 
+            grid.prop(obj, "pf_mirror", text="Bit 3 (Mirror)")
+            
+            # Portals also need Node Culling flags
+            box = layout.box()
+            box.label(text="Node Culling Flags", icon='PROPERTIES')
             row = box.row()
-            row.prop(obj, "render_flags", text="Raw Int")
+            row.prop(obj, "cull_flags", text="Raw Int (Culling)")
+            grid = box.grid_flow(row_major=True, columns=2, align=True)
+            grid.prop(obj, "cf_node_visible")
+            grid.prop(obj, "cf_node_cam_coll")
+            grid.prop(obj, "cf_node_collision")
+            grid.prop(obj, "cf_node_castshadow")
+            grid.prop(obj, "cf_node_update")
+            grid.prop(obj, "cf_node_freeze")
+            grid.prop(obj, "cf_node_hierarchy")
             
-            # Active Checkbox - Top Left
+            box = layout.box()
+            box.prop(obj, "ls3d_user_props", text="User Props", icon='TEXT')
+
+        # --- CASE B: STANDARD VISUAL MESH ---
+        elif current_type == '1' and obj.type == 'MESH':
+            layout.prop(obj, "visual_type", text="Mesh Type")
+            
+            # Render Flags
+            box = layout.box()
+            box.label(text="Render Flags", icon='RESTRICT_RENDER_OFF')
             row = box.row()
-            row.prop(obj, "rf1_active")
-            box.separator()
+            row.prop(obj, "render_flags", text="Raw Int 1 (Byte 1)")
             
-            # Using grid for flags
-            grid = box.grid_flow(row_major=True, columns=2, even_columns=True, align=True)
+            grid = box.grid_flow(row_major=True, columns=2, align=True)
             grid.prop(obj, "rf1_cast_shadow")
             grid.prop(obj, "rf1_receive_shadow")
             grid.prop(obj, "rf1_draw_last")
             grid.prop(obj, "rf1_zbias")
+            grid.prop(obj, "rf1_bright")
             
+            # Logic Flags
             box = layout.box()
-            box.label(text="Render Flags 2 (Logic)", icon='MODIFIER')
+            box.label(text="Logic Flags", icon='MODIFIER')
             row = box.row()
-            row.prop(obj, "render_flags2", text="Raw Int")
+            row.prop(obj, "render_flags2", text="Raw Int 2 (Byte 2)")
             
-            grid = box.grid_flow(row_major=True, columns=2, even_columns=True, align=True)
+            grid = box.grid_flow(row_major=True, columns=2, align=True)
             grid.prop(obj, "rf2_decal")
             grid.prop(obj, "rf2_stencil")
             grid.prop(obj, "rf2_mirror")
+            grid.prop(obj, "rf2_fadeout")
             grid.prop(obj, "rf2_proj")
             grid.prop(obj, "rf2_nofog")
+            
+            # Billboard / Mirror Props
+            if hasattr(obj, "visual_type"):
+                if obj.visual_type == '4': # Billboard
+                    box = layout.box()
+                    box.label(text="Billboard", icon='IMAGE_PLANE')
+                    box.prop(obj, "rot_mode")
+                    if obj.rot_mode == '2': box.prop(obj, "rot_axis")
+                elif obj.visual_type == '8': # Mirror
+                    box = layout.box()
+                    box.label(text="Mirror", icon='MOD_MIRROR')
+                    box.prop(obj, "mirror_color")
+                    box.prop(obj, "mirror_dist")
+            
+            # Node Properties
+            box = layout.box()
+            box.label(text="Node Culling Flags", icon='PROPERTIES')
+            row = box.row()
+            row.prop(obj, "cull_flags", text="Raw Int (Culling)")
+            grid = box.grid_flow(row_major=True, columns=2, align=True)
+            grid.prop(obj, "cf_node_visible")
+            grid.prop(obj, "cf_node_cam_coll")
+            grid.prop(obj, "cf_node_collision")
+            grid.prop(obj, "cf_node_castshadow")
+            grid.prop(obj, "cf_node_update")
+            grid.prop(obj, "cf_node_freeze")
+            grid.prop(obj, "cf_node_hierarchy")
+            
+            box = layout.box()
+            box.prop(obj, "ls3d_user_props", text="User Props", icon='TEXT')
 
-        # --- CULL FLAGS ---
-        box = layout.box()
-        box.label(text="Culling & Collision", icon='PHYSICS')
-        box.prop(obj, "cull_flags", text="Raw Int")
-        
-        # Visible is separate
-        box.prop(obj, "cf_visible")
-
-        # Label above the checkboxes
-        box.label(text="Collision Masks:")
-        
-        grid = box.grid_flow(row_major=True, columns=2, even_columns=True, align=True)
-        grid.prop(obj, "cf_coll_player")
-        grid.prop(obj, "cf_coll_ai")
-        grid.prop(obj, "cf_coll_vehicle")
-        grid.prop(obj, "cf_coll_camera")
-        grid.prop(obj, "cf_coll_proj")
-        grid.prop(obj, "cf_coll_item")
-
-        box.prop(obj, "cf_light_int")
-
-        # --- PARAMS ---
-        box = layout.box()
-        box.label(text="Special Properties")
-        box.prop(obj, "ls3d_user_props", text="", icon='TEXT')
-
-        # --- LOD ---
-        if obj.type == 'MESH':
+            # LOD SETTINGS (Bottom)
             box = layout.box()
             box.label(text="Level-Of-Detail Settings", icon='MESH_DATA')
-            box.prop(obj, "ls3d_lod_dist")
+            box.prop(obj, "ls3d_lod_dist", text="Fade-In Distance")
 
-        # --- SPECIFIC TYPES ---
-        if "plane" in obj.name.lower() or "portal" in obj.name.lower():
+       # --- CASE C: SECTOR (Not a Portal) ---
+        elif current_type == '5':
             box = layout.box()
-            box.label(text="Portal", icon='OUTLINER_OB_LIGHT')
-            box.prop(obj, "ls3d_portal_enabled", toggle=True)
-            box.prop(obj, "ls3d_portal_flags")
-            row = box.row(align=True)
-            row.prop(obj, "ls3d_portal_near")
-            row.prop(obj, "ls3d_portal_far")
+            box.label(text="Sector Flags", icon='SCENE_DATA')
+            
+            # Flags 1 (Using String Property for Unsigned Display)
+            row = box.row()
+            row.prop(obj, "ls3d_sector_flags1_str", text="Raw Int 1")
+            
+            # Flags 2 (Using String Property for Unsigned Display)
+            row = box.row()
+            row.prop(obj, "ls3d_sector_flags2_str", text="Raw Int 2")
+            
+            grid = box.grid_flow(row_major=True, columns=2, align=True)
+            grid.prop(obj, "sf_active")
+            grid.prop(obj, "sf_collision")
+            grid.prop(obj, "sf_indoor")
+            
+            # Node Properties
+            box = layout.box()
+            box.label(text="Node Culling Flags", icon='PROPERTIES')
+            row = box.row()
+            row.prop(obj, "cull_flags", text="Raw Int (Culling)")
+            grid = box.grid_flow(row_major=True, columns=2, align=True)
+            grid.prop(obj, "cf_node_visible")
+            grid.prop(obj, "cf_node_cam_coll")
+            grid.prop(obj, "cf_node_collision")
+            grid.prop(obj, "cf_node_castshadow")
+            grid.prop(obj, "cf_node_update")
+            grid.prop(obj, "cf_node_freeze")
+            grid.prop(obj, "cf_node_hierarchy")
+            
+            box = layout.box()
+            box.prop(obj, "ls3d_user_props", text="User Props", icon='TEXT')
 
-        if obj.type == 'MESH' and "sector" in obj.name.lower():
+        # --- CASE D: DUMMY / TARGET / MODEL ---
+        elif current_type in ('6', '7', '9'):
+            if current_type == '6':
+                box = layout.box()
+                box.label(text="Dummy Bounding Box (Local)", icon='SHADING_BBOX')
+                if "bbox_min" in obj and "bbox_max" in obj:
+                    col = box.column(align=True)
+                    col.prop(obj, '["bbox_min"]', text="Min (XYZ)")
+                    col.prop(obj, '["bbox_max"]', text="Max (XYZ)")
+                else:
+                    box.label(text="No BBox Data (Will auto-generate)", icon='ERROR')
+            
+            # Node Properties
             box = layout.box()
-            box.label(text="Sector", icon='SCENE_DATA')
-            box.prop(obj, "ls3d_sector_flags1")
-            box.prop(obj, "ls3d_sector_flags2")
+            box.label(text="Node Culling Flags", icon='PROPERTIES')
+            row = box.row()
+            row.prop(obj, "cull_flags", text="Raw Int (Culling)")
+            grid = box.grid_flow(row_major=True, columns=2, align=True)
+            grid.prop(obj, "cf_node_visible")
+            grid.prop(obj, "cf_node_cam_coll")
+            grid.prop(obj, "cf_node_collision")
+            grid.prop(obj, "cf_node_castshadow")
+            grid.prop(obj, "cf_node_update")
+            grid.prop(obj, "cf_node_freeze")
+            grid.prop(obj, "cf_node_hierarchy")
+            
+            box = layout.box()
+            box.prop(obj, "ls3d_user_props", text="User Props", icon='TEXT')
+            
+        # --- CASE E: DEFAULT FALLBACK ---
+        else:
+            box = layout.box()
+            box.label(text="Node Culling Flags", icon='PROPERTIES')
+            row = box.row()
+            row.prop(obj, "cull_flags", text="Raw Int (Culling)")
+            grid = box.grid_flow(row_major=True, columns=2, align=True)
+            grid.prop(obj, "cf_node_visible")
+            grid.prop(obj, "cf_node_cam_coll")
+            grid.prop(obj, "cf_node_collision")
+            grid.prop(obj, "cf_node_castshadow")
+            grid.prop(obj, "cf_node_update")
+            grid.prop(obj, "cf_node_freeze")
+            grid.prop(obj, "cf_node_hierarchy")
+            
+            box = layout.box()
+            box.prop(obj, "ls3d_user_props", text="User Props", icon='TEXT')
 
-        if obj.type == 'MESH' and hasattr(obj, "visual_type") and obj.visual_type == '4':
-            box = layout.box()
-            box.label(text="Billboard", icon='IMAGE_PLANE')
-            box.prop(obj, "rot_mode")
-            box.prop(obj, "rot_axis")
+class The4DSPanelMaterial(bpy.types.Panel):
+    bl_label = "4DS Material Properties"
+    bl_idname = "MATERIAL_PT_4ds"
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "material"
+    
+    def draw(self, context):
+        mat = context.material
+        if not mat: return
+        layout = self.layout
+        
+        # --- Colors ---
+        box = layout.box()
+        box.label(text="Colors", icon='COLOR')
+        col = box.column(align=True)
+        col.prop(mat, "ls3d_diffuse_color", text="Diffuse")
+        col.prop(mat, "ls3d_ambient_color", text="Ambient")
+        col.prop(mat, "ls3d_emission_color", text="Emission")
+        
+        # --- RAW FLAGS INT (Using String for Positive Display) ---
+        box = layout.box()
+        box.label(text="Global Material Flags", icon='PREFERENCES')
+        box.prop(mat, "ls3d_material_flags_str", text="Raw Int (Unsigned)")
 
-        if obj.type == 'MESH' and hasattr(obj, "visual_type") and obj.visual_type == '8':
-            box = layout.box()
-            box.label(text="Mirror", icon='MOD_MIRROR')
-            box.prop(obj, "mirror_color")
-            box.prop(obj, "mirror_dist")
+        # --- Diffuse Settings ---
+        layout.label(text="Diffuse & General", icon='TEXTURE')
+        box = layout.box()
+        col = box.column(align=True)
+        
+        row = col.row()
+        row.prop(mat, "ls3d_flag_misc_unlit") 
+        row.prop(mat, "ls3d_flag_diffuse_enable")
+        
+        row = col.row()
+        row.prop(mat, "ls3d_flag_diffuse_doublesided")
+        row.prop(mat, "ls3d_flag_diffuse_colored")
+        
+        row = col.row()
+        row.prop(mat, "ls3d_flag_diffuse_mipmap")
+        row.prop(mat, "ls3d_flag_diffuse_animated")
+        
+        row = col.row()
+        row.prop(mat, "ls3d_flag_disable_u_tiling")
+        row.prop(mat, "ls3d_flag_disable_v_tiling")
+        
+        # DIFFUSE ANIMATION
+        if mat.ls3d_flag_diffuse_animated:
+            subbox = box.box()
+            subbox.label(text="Diffuse Animation", icon='ANIM')
+            col_anim = subbox.column(align=True)
+            col_anim.prop(mat, "ls3d_diffuse_anim_frames")
+            col_anim.prop(mat, "ls3d_diffuse_anim_period")
+
+        # --- Alpha Settings ---
+        layout.label(text="Alpha / Transparency", icon='TRIA_RIGHT')
+        box = layout.box()
+        col = box.column(align=True)
+        row = col.row()
+        row.prop(mat, "ls3d_flag_alpha_enable")
+        row.prop(mat, "ls3d_flag_alphatex")
+        row = col.row()
+        row.prop(mat, "ls3d_flag_alpha_colorkey")
+        row.prop(mat, "ls3d_flag_alpha_additive")
+        row = col.row()
+        row.prop(mat, "ls3d_flag_alpha_in_tex")
+        row.prop(mat, "ls3d_flag_alpha_animated")
+        
+        # ALPHA ANIMATION
+        if mat.ls3d_flag_alpha_animated:
+            subbox = box.box()
+            subbox.label(text="Alpha Animation", icon='ANIM')
+            col_anim = subbox.column(align=True)
+            col_anim.prop(mat, "ls3d_alpha_anim_frames")
+            col_anim.prop(mat, "ls3d_alpha_anim_period")
+
+        # --- Environment Settings ---
+        layout.label(text="Environment Mapping", icon='WORLD_DATA')
+        box = layout.box()
+        col = box.column(align=True)
+        row = col.row()
+        row.prop(mat, "ls3d_flag_env_enable")
+        row.prop(mat, "ls3d_flag_env_use_map")
+        row = col.row()
+        row.prop(mat, "ls3d_flag_env_overlay")
+        row.prop(mat, "ls3d_flag_env_multiply")
+        row.prop(mat, "ls3d_flag_env_additive")
+        row = col.row()
+        row.prop(mat, "ls3d_flag_env_projy")
+        row.prop(mat, "ls3d_flag_env_detaily")
+        row.prop(mat, "ls3d_flag_env_detailz")
+
+        layout.separator()
+        layout.operator("node.add_ls3d_env_setup", icon='NODETREE', text="Add Env Setup")
+        layout.operator("node.add_ls3d_group", icon='NODETREE', text="Add Material Node")
 
 def safe_link(tree, from_socket, to_socket):
     if from_socket and to_socket:
         tree.links.new(from_socket, to_socket)
 
-def get_or_create_ls3d_group():
-    group_name = "LS3D Material Data"
-    
-    if group_name in bpy.data.node_groups:
-        ng = bpy.data.node_groups[group_name]
-        # Cleanup if structure is outdated or has old sockets
-        if any(n in s.name for s in ng.interface.items_tree for n in ["Tint", "Key", "Emission", "Environment"]):
-            ng.nodes.clear(); ng.interface.clear()
-    else:
-        ng = bpy.data.node_groups.new(name=group_name, type='ShaderNodeTree')
-
-    # Interface
-    if not ng.interface.items_tree:
-        # Texture Inputs
-        ng.interface.new_socket("Diffuse Map", in_out='INPUT', socket_type='NodeSocketColor')
-        ng.interface.new_socket("Alpha Map", in_out='INPUT', socket_type='NodeSocketColor')
-        ng.interface.new_socket("Reflection", in_out='INPUT', socket_type='NodeSocketColor')
-        
-        # Values
-        op_socket = ng.interface.new_socket("Opacity", in_out='INPUT', socket_type='NodeSocketFloat')
-        
-        # Info (Pass-through for scripts/drivers if needed)
-        ng.interface.new_socket("Anim Frames", in_out='INPUT', socket_type='NodeSocketFloat')
-        ng.interface.new_socket("Anim Period", in_out='INPUT', socket_type='NodeSocketFloat')
-        ng.interface.new_socket("Env Mode", in_out='INPUT', socket_type='NodeSocketFloat')
-        ng.interface.new_socket("Env Type", in_out='INPUT', socket_type='NodeSocketFloat')
-
-        ng.interface.new_socket("BSDF", in_out='OUTPUT', socket_type='NodeSocketShader')
-
-    # Setup Defaults
-    for socket in ng.interface.items_tree:
-        if socket.bl_socket_idname == 'NodeSocketColor':
-            socket.default_value = (1.0, 1.0, 1.0, 1.0)
-            if "Reflection" in socket.name: 
-                socket.default_value = (0.0, 0.0, 0.0, 1.0)
-        elif socket.bl_socket_idname == 'NodeSocketFloat':
-            socket.default_value = 0.0
-            if "Opacity" in socket.name: 
-                socket.default_value = 100.0
-                socket.min_value = 0.0
-                socket.max_value = 100.0
-            if "Env Mode" in socket.name: socket.default_value = 2.0 
-
-    # Nodes Construction
-    if not ng.nodes:
-        input_node = ng.nodes.new('NodeGroupInput')
-        input_node.location = (-1000, 0)
-        output_node = ng.nodes.new('NodeGroupOutput')
-        output_node.location = (600, 0)
-        
-        # 1. Add Environment/Reflection (Diffuse + Reflection)
-        # Note: We removed Diffuse Tint multiplication. Diffuse Map goes straight here.
-        add_env = ng.nodes.new('ShaderNodeMixRGB')
-        add_env.blend_type = 'ADD'
-        add_env.inputs['Fac'].default_value = 1.0
-        add_env.location = (-700, 200)
-
-        # 2. Opacity Logic (0-100 -> 0-1)
-        math_op_scale = ng.nodes.new('ShaderNodeMath')
-        math_op_scale.operation = 'DIVIDE'
-        math_op_scale.inputs[1].default_value = 100.0
-        math_op_scale.location = (-900, -100)
-
-        # 3. Alpha Logic (Opacity * Alpha Map)
-        math_alpha = ng.nodes.new('ShaderNodeMath')
-        math_alpha.operation = 'MULTIPLY'
-        math_alpha.location = (-700, -100)
-
-        # 4. Shader
-        principled = ng.nodes.new('ShaderNodeBsdfPrincipled')
-        principled.location = (0, 200)
-        # Matte base. Reflections are added via Texture input, not PBR specular.
-        principled.inputs["Roughness"].default_value = 1.0 
-        principled.inputs["Specular IOR Level"].default_value = 0.0
-        principled.inputs["Metallic"].default_value = 0.0
-        principled.inputs["Emission Color"].default_value = (0,0,0,1) # No input, default to black
-        
-        emission = ng.nodes.new('ShaderNodeEmission')
-        emission.location = (0, -100)
-        
-        # Wiring
-        inputs = input_node.outputs
-        
-        # Diffuse & Reflection
-        safe_link(ng, inputs.get("Diffuse Map"), add_env.inputs[1])
-        safe_link(ng, inputs.get("Reflection"), add_env.inputs[2])
-        
-        # Opacity Scaling
-        safe_link(ng, inputs.get("Opacity"), math_op_scale.inputs[0])
-        
-        # Alpha Calculation
-        safe_link(ng, math_op_scale.outputs[0], math_alpha.inputs[0])
-        safe_link(ng, inputs.get("Alpha Map"), math_alpha.inputs[1])
-        
-        # Shader Inputs
-        safe_link(ng, add_env.outputs[0], principled.inputs["Base Color"])
-        
-        # Alpha Connection
-        safe_link(ng, math_alpha.outputs[0], principled.inputs["Alpha"]) 
-        
-        # Emission (Alternative flow)
-        safe_link(ng, add_env.outputs[0], emission.inputs["Color"])
-        safe_link(ng, math_alpha.outputs[0], emission.inputs["Strength"])
-        
-        # OUTPUT
-        safe_link(ng, principled.outputs[0], output_node.inputs["BSDF"])
-    
-    return ng
-
-class LS3D_OT_AddEnvSetup(bpy.types.Operator):
-    """Add Reflection Texture Setup"""
-    bl_idname = "node.add_ls3d_env_setup"
-    bl_label = "Add Reflection"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        mat = context.object.active_material
-        if not mat or not mat.use_nodes: return {'CANCELLED'}
-        
-        tree = mat.node_tree
-        nodes = tree.nodes
-        links = tree.links
-        
-        ls3d_node = next((n for n in nodes if n.type == 'GROUP' and n.node_tree and "LS3D Material Data" in n.node_tree.name), None)
-        if not ls3d_node: return {'CANCELLED'}
-
-        # 1. Frame
-        frame = nodes.new('NodeFrame')
-        frame.label = "Reflection"
-        frame.location = (-600, -400)
-        
-        # 2. Nodes
-        coord = nodes.new('ShaderNodeTexCoord')
-        coord.location = (-1100, -400); coord.parent = frame
-        
-        mapping = nodes.new('ShaderNodeMapping')
-        mapping.vector_type = 'TEXTURE'
-        mapping.location = (-900, -400); mapping.parent = frame
-        
-        tex_image = nodes.new('ShaderNodeTexImage')
-        tex_image.location = (-700, -400); tex_image.parent = frame
-        tex_image.label = "Reflection Map"
-        tex_image.projection = 'SPHERE' 
-        
-        env_group_data = get_or_create_env_group()
-        env_group = nodes.new('ShaderNodeGroup')
-        env_group.node_tree = env_group_data
-        env_group.location = (-400, -400); env_group.parent = frame
-        
-        # 3. Wiring
-        links.new(coord.outputs["Reflection"], mapping.inputs["Vector"])
-        links.new(mapping.outputs["Vector"], tex_image.inputs["Vector"])
-        links.new(tex_image.outputs["Color"], env_group.inputs["Color"])
-        links.new(env_group.outputs["Output"], ls3d_node.inputs["Reflection"])
-        
-        # Toggle property instead of node socket
-        mat.ls3d_env_enabled = True
-        
-        return {'FINISHED'}
-                    
 def get_or_create_env_group():
     group_name = "LS3D Environment"
     
@@ -361,35 +459,184 @@ def get_or_create_env_group():
     ng = bpy.data.node_groups.new(name=group_name, type='ShaderNodeTree')
     
     # Interface
-    ng.interface.new_socket("Color", in_out='INPUT', socket_type='NodeSocketColor')
-    ng.interface.new_socket("Intensity", in_out='INPUT', socket_type='NodeSocketFloat')
-    ng.interface.new_socket("Output", in_out='OUTPUT', socket_type='NodeSocketColor')
+    if not ng.interface.items_tree:
+        ng.interface.new_socket("Color", in_out='INPUT', socket_type='NodeSocketColor')
+        ng.interface.new_socket("Intensity", in_out='INPUT', socket_type='NodeSocketFloat')
+        ng.interface.new_socket("Output", in_out='OUTPUT', socket_type='NodeSocketColor')
+        
+        if "Intensity" in ng.interface.items_tree:
+            ng.interface.items_tree["Intensity"].default_value = 1.0
+            ng.interface.items_tree["Intensity"].min_value = 0.0
+            ng.interface.items_tree["Intensity"].max_value = 100.0
     
-    # Default values
-    if "Intensity" in ng.interface.items_tree:
-        ng.interface.items_tree["Intensity"].default_value = 1.0
-        ng.interface.items_tree["Intensity"].min_value = 0.0
-        ng.interface.items_tree["Intensity"].max_value = 100.0 # Clamp max
-    
-    # Nodes
-    input_node = ng.nodes.new('NodeGroupInput')
-    input_node.location = (-300, 0)
-    
-    output_node = ng.nodes.new('NodeGroupOutput')
-    output_node.location = (300, 0)
-    
-    mix = ng.nodes.new('ShaderNodeMixRGB')
-    mix.blend_type = 'MULTIPLY'
-    mix.inputs['Fac'].default_value = 1.0
-    mix.location = (0, 0)
-    
-    # Links
-    ng.links.new(input_node.outputs["Color"], mix.inputs[1])
-    ng.links.new(input_node.outputs["Intensity"], mix.inputs[2])
-    ng.links.new(mix.outputs[0], output_node.inputs["Output"])
+    if not ng.nodes:
+        input_node = ng.nodes.new('NodeGroupInput')
+        input_node.location = (-300, 0)
+        output_node = ng.nodes.new('NodeGroupOutput')
+        output_node.location = (300, 0)
+        
+        # Multiply Color * Intensity
+        mix = ng.nodes.new('ShaderNodeMixRGB')
+        mix.blend_type = 'MULTIPLY'
+        mix.inputs['Fac'].default_value = 1.0
+        mix.location = (0, 0)
+        
+        ng.links.new(input_node.outputs.get("Color"), mix.inputs[1])
+        ng.links.new(input_node.outputs.get("Intensity"), mix.inputs[2])
+        ng.links.new(mix.outputs[0], output_node.inputs.get("Output"))
     
     return ng
 
+def get_or_create_ls3d_group():
+    group_name = "LS3D Material Data"
+    
+    if group_name in bpy.data.node_groups:
+        ng = bpy.data.node_groups[group_name]
+    else:
+        ng = bpy.data.node_groups.new(name=group_name, type='ShaderNodeTree')
+
+    # Interface (Emission Removed)
+    if not ng.interface.items_tree:
+        ng.interface.new_socket("Diffuse Map", in_out='INPUT', socket_type='NodeSocketColor')
+        ng.interface.new_socket("Alpha Map", in_out='INPUT', socket_type='NodeSocketColor')
+        ng.interface.new_socket("Environment Map", in_out='INPUT', socket_type='NodeSocketColor')
+        ng.interface.new_socket("Opacity", in_out='INPUT', socket_type='NodeSocketFloat')
+        ng.interface.new_socket("Anim Frames", in_out='INPUT', socket_type='NodeSocketFloat')
+        ng.interface.new_socket("Anim Period", in_out='INPUT', socket_type='NodeSocketFloat')
+        # Emission socket removed as requested
+        ng.interface.new_socket("BSDF", in_out='OUTPUT', socket_type='NodeSocketShader')
+
+    # Defaults
+    for socket in ng.interface.items_tree:
+        if socket.bl_socket_idname == 'NodeSocketColor':
+            socket.default_value = (1.0, 1.0, 1.0, 1.0)
+            if "Environment Map" in socket.name: socket.default_value = (0.0, 0.0, 0.0, 1.0)
+        elif socket.bl_socket_idname == 'NodeSocketFloat':
+            if "Opacity" in socket.name: socket.default_value = 100.0
+
+    if not ng.nodes:
+        input_node = ng.nodes.new('NodeGroupInput')
+        input_node.location = (-1000, 0)
+        output_node = ng.nodes.new('NodeGroupOutput')
+        output_node.location = (600, 0)
+        
+        # Add Diffuse + Environment
+        add_env = ng.nodes.new('ShaderNodeMixRGB')
+        add_env.blend_type = 'ADD'
+        add_env.inputs['Fac'].default_value = 1.0
+        add_env.location = (-700, 200)
+
+        # Opacity Scaling
+        math_op_scale = ng.nodes.new('ShaderNodeMath')
+        math_op_scale.operation = 'DIVIDE'
+        math_op_scale.inputs[1].default_value = 100.0
+        math_op_scale.location = (-900, -100)
+
+        # Alpha Calc
+        math_alpha = ng.nodes.new('ShaderNodeMath')
+        math_alpha.operation = 'MULTIPLY'
+        math_alpha.location = (-700, -100)
+
+        # Principled BSDF
+        principled = ng.nodes.new('ShaderNodeBsdfPrincipled')
+        principled.location = (0, 200)
+        principled.inputs["Roughness"].default_value = 1.0 
+        principled.inputs["Specular IOR Level"].default_value = 0.0
+        principled.inputs["Metallic"].default_value = 0.0
+        
+        # Links
+        safe_link(ng, input_node.outputs.get("Diffuse Map"), add_env.inputs[1])
+        safe_link(ng, input_node.outputs.get("Environment Map"), add_env.inputs[2])
+        
+        safe_link(ng, input_node.outputs.get("Opacity"), math_op_scale.inputs[0])
+        safe_link(ng, math_op_scale.outputs[0], math_alpha.inputs[0])
+        safe_link(ng, input_node.outputs.get("Alpha Map"), math_alpha.inputs[1])
+        
+        safe_link(ng, add_env.outputs[0], principled.inputs["Base Color"])
+        safe_link(ng, math_alpha.outputs[0], principled.inputs["Alpha"]) 
+        # Emission connection removed
+        
+        safe_link(ng, principled.outputs[0], output_node.inputs["BSDF"])
+    
+    return ng
+
+class LS3D_OT_AddEnvSetup(bpy.types.Operator):
+    """Add LS3D Environment shader nodes with a frame"""
+    bl_idname = "node.add_ls3d_env_setup"
+    bl_label = "Add LS3D Environment"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        obj = context.object
+        if not obj or not obj.active_material:
+            self.report({'ERROR'}, "No active material found.")
+            return {'CANCELLED'}
+            
+        mat = context.object.active_material
+        if not mat.use_nodes:
+            mat.use_nodes = True
+        
+        tree = mat.node_tree
+        nodes = tree.nodes
+        links = tree.links
+        
+        # 1. Find existing LS3D node to connect to
+        ls3d_node = next((n for n in nodes if n.type == 'GROUP' and n.node_tree and "LS3D Material Data" in n.node_tree.name), None)
+
+        # 2. Determine Location
+        start_x = -1500
+        start_y = 300
+        if ls3d_node:
+            start_x = ls3d_node.location.x - 1300
+            start_y = ls3d_node.location.y - 200
+
+        # 3. Create the Frame
+        frame = nodes.new('NodeFrame')
+        frame.label = "LS3D Environment Setup"
+        frame.location = (start_x, start_y)
+        frame.use_custom_color = True
+        frame.color = (0.2, 0.5, 0.4) 
+        
+        # 4. Create nodes
+        coord = nodes.new('ShaderNodeTexCoord')
+        coord.location = (start_x + 50, start_y - 50)
+        coord.parent = frame
+        
+        mapping = nodes.new('ShaderNodeMapping')
+        mapping.vector_type = 'TEXTURE'
+        mapping.location = (start_x + 250, start_y - 50)
+        mapping.parent = frame
+        
+        tex_image = nodes.new('ShaderNodeTexImage')
+        tex_image.projection = 'SPHERE' 
+        tex_image.label = "Environment Map"
+        tex_image.location = (start_x + 450, start_y - 50)
+        tex_image.parent = frame
+        
+        env_group_data = get_or_create_env_group()
+        env_group = nodes.new('ShaderNodeGroup')
+        env_group.node_tree = env_group_data
+        env_group.location = (start_x + 750, start_y - 50)
+        env_group.parent = frame
+        
+        # 5. Connections
+        # FIXED: "Reflection" is the hardcoded name in Blender's TexCoord node
+        links.new(coord.outputs["Reflection"], mapping.inputs["Vector"])
+        links.new(mapping.outputs["Vector"], tex_image.inputs["Vector"])
+        links.new(tex_image.outputs["Color"], env_group.inputs["Color"])
+        
+        if ls3d_node:
+            if "Environment Map" in ls3d_node.inputs:
+                links.new(env_group.outputs["Output"], ls3d_node.inputs["Environment Map"])
+        
+        mat.ls3d_env_enabled = True
+        
+        for n in nodes: n.select = False
+        tex_image.select = True
+        nodes.active = tex_image
+        
+        return {'FINISHED'}
+    
 class LS3D_OT_AddNode(bpy.types.Operator):
     """Add LS3D Material Data Node to the current material"""
     bl_idname = "node.add_ls3d_group"
@@ -435,7 +682,16 @@ class The4DSExporter:
         self.frame_index = 1
         self.lod_map = {}
     def write_string(self, f, string):
-        encoded = string.encode("windows-1250")
+        # Encode as Windows-1250
+        try:
+            encoded = string.encode("windows-1250", errors="replace")
+        except:
+            encoded = string.encode("ascii", errors="replace")
+            
+        # Hard limit 255 chars (1 byte length)
+        if len(encoded) > 255:
+            encoded = encoded[:255]
+            
         f.write(struct.pack("B", len(encoded)))
         if len(encoded) > 0:
             f.write(encoded)
@@ -589,11 +845,27 @@ class The4DSExporter:
             f.write(struct.pack("<3f", max_bounds.x, max_bounds.z, max_bounds.y))
             f.write(struct.pack("<3f", center.x, center.z, center.y))
             f.write(struct.pack("<f", dist))
+    
     def serialize_dummy(self, f, obj):
-        min_bounds = obj.get("bbox_min", (0.0, 0.0, 0.0))
-        max_bounds = obj.get("bbox_max", (0.0, 0.0, 0.0))
-        f.write(struct.pack("<3f", min_bounds[0], min_bounds[2], min_bounds[1]))
-        f.write(struct.pack("<3f", max_bounds[0], max_bounds[2], max_bounds[1]))
+        # 1. Get Local Bounds (Unscaled by Object Transform)
+        if "bbox_min" in obj and "bbox_max" in obj:
+            # Use stored values from Import or UI
+            # Blender Space (X, Y, Z)
+            min_v = Vector(obj["bbox_min"])
+            max_v = Vector(obj["bbox_max"])
+        else:
+            # Fallback for new objects: Create a centered box based on visual display size
+            # We assume a cube for new objects
+            s = obj.empty_display_size
+            min_v = Vector((-s, -s, -s))
+            max_v = Vector((s, s, s))
+
+        # 2. Convert to Mafia Space (Swap Y and Z)
+        # Blender (X, Y, Z) -> Mafia (X, Z, Y)
+        # We write Min then Max
+        f.write(struct.pack("<3f", min_v.x, min_v.z, min_v.y)) 
+        f.write(struct.pack("<3f", max_v.x, max_v.z, max_v.y))
+
     def serialize_target(self, f, obj):
         f.write(struct.pack("<H", 0))
         link_ids = obj.get("link_ids", [])
@@ -602,20 +874,47 @@ class The4DSExporter:
             f.write(struct.pack(f"<{len(link_ids)}H", *link_ids))
 
     def serialize_occluder(self, f, obj):
-        mesh = obj.data
-        bm = bmesh.new()
-        bm.from_mesh(mesh)
+        # 1. Prepare Evaluated Mesh
+        # Occluder geometry is stored in LOCAL space. 
+        # The Frame Transform (Matrix) handles world position.
+        try:
+            depsgraph = bpy.context.evaluated_depsgraph_get()
+            eval_obj = obj.evaluated_get(depsgraph)
+            bm = bmesh.new()
+            bm.from_mesh(eval_obj.to_mesh())
+        except:
+            bm = bmesh.new()
+            bm.from_mesh(obj.data)
+
+        # 2. Triangulate (Required)
+        bmesh.ops.triangulate(bm, faces=bm.faces)
+        
         bm.verts.ensure_lookup_table()
         bm.faces.ensure_lookup_table()
+        
+        # 3. Write Counts (uint32)
         f.write(struct.pack("<I", len(bm.verts)))
         f.write(struct.pack("<I", len(bm.faces)))
-        for vert in bm.verts:
-            pos = vert.co
-            f.write(struct.pack("<3f", pos.x, pos.z, pos.y))
+        
+        # 4. Write Vertices
+        # Swap Y/Z for Mafia Space
+        for v in bm.verts:
+            f.write(struct.pack("<3f", v.co.x, v.co.z, v.co.y))
+            
+        # 5. Write Faces
+        # Swap Winding (0, 2, 1)
         for face in bm.faces:
-            idxs = [vert.index for vert in face.verts]
-            f.write(struct.pack("<3H", idxs[0], idxs[2], idxs[1]))
+            fv = face.verts
+            f.write(struct.pack("<3H", fv[0].index, fv[2].index, fv[1].index))
+            
+        # Cleanup
         bm.free()
+        try:
+            if 'eval_obj' in locals():
+                eval_obj.to_mesh_clear()
+        except:
+            pass
+        
     def serialize_joint(self, f, bone, armature, parent_id):
         matrix = bone.matrix_local.copy()
         matrix[1], matrix[2] = matrix[2].copy(), matrix[1].copy()
@@ -624,316 +923,565 @@ class The4DSExporter:
         bone_idx = list(armature.data.bones).index(bone)
         f.write(struct.pack("<I", bone_idx))
     
-    def serialize_material(self, f, mat, mat_index):
-        # 1. Colors & Opacity
-        env_color = getattr(mat, "ls3d_ambient_color", (0.5, 0.5, 0.5))
-        diffuse_color = getattr(mat, "ls3d_diffuse_color", (1.0, 1.0, 1.0))
-        emission_color = getattr(mat, "ls3d_emission_color", (0.0, 0.0, 0.0))
-        
-        opacity = 1.0
-        if mat.use_nodes and mat.node_tree:
-            ls3d_node = next((n for n in mat.node_tree.nodes if n.type == 'GROUP' and n.node_tree and "LS3D Material Data" in n.node_tree.name), None)
-            if ls3d_node and "Opacity" in ls3d_node.inputs:
-                opacity = ls3d_node.inputs["Opacity"].default_value / 100.0
-
-        # 2. BUILD FLAGS (Using Constants)
-        final_flags = 0
-        
-        # High Word / Standard
-        if not mat.ls3d_misc_tile_u:  final_flags |= MTL_DISABLE_U_TILING
-        if not mat.ls3d_misc_tile_v:  final_flags |= MTL_DISABLE_V_TILING
-        if mat.ls3d_diff_enabled:     final_flags |= MTL_DIFFUSETEX
-        if mat.ls3d_env_enabled:      final_flags |= MTL_ENVMAP
-        if mat.ls3d_calc_reflect_y:   final_flags |= MTL_CALCREFLECTTEXY
-        if mat.ls3d_proj_reflect_y:   final_flags |= MTL_PROJECTREFLECTTEXY
-        if mat.ls3d_proj_reflect_z:   final_flags |= MTL_PROJECTREFLECTTEXZ
-        if mat.ls3d_diff_mipmap:      final_flags |= MTL_MIPMAP
-        if mat.ls3d_alpha_imgalpha:   final_flags |= MTL_ALPHA_IN_TEX
-        if mat.ls3d_alpha_anim:       final_flags |= MTL_ANIMATED_ALPHA
-        if mat.ls3d_diff_anim:        final_flags |= MTL_ANIMATED_DIFFUSE
-        if mat.ls3d_diff_colored:     final_flags |= MTL_COLORED
-        if mat.ls3d_diff_2sided:      final_flags |= MTL_DOUBLESIDED
-        if mat.ls3d_alpha_colorkey:   final_flags |= MTL_COLORKEY
-        if mat.ls3d_alpha_enabled:    final_flags |= MTL_ALPHA
-        if mat.ls3d_alpha_addmix:     final_flags |= MTL_ADDITIVE
-        if mat.ls3d_misc_zwrite:      final_flags |= MTL_ADDITIVE # Fallback for Z-Write
-
-        # Environment Byte
-        if mat.ls3d_env_overlay:      final_flags |= MTL_ENV_OVERLAY
-        if mat.ls3d_env_multiply:     final_flags |= MTL_ENV_MULTIPLY
-        if mat.ls3d_env_additive:     final_flags |= MTL_ENV_ADDITIVE
-        if mat.ls3d_disable_tex:      final_flags |= MTL_ENV_DISABLE_TEX
-        if mat.ls3d_env_yproj:        final_flags |= MTL_ENV_PROJECT_Y
-        if mat.ls3d_env_ydet:         final_flags |= MTL_ENV_DETERMINED_Y
-        if mat.ls3d_env_zdet:         final_flags |= MTL_ENV_DETERMINED_Z
-        if mat.ls3d_alpha_effect:     final_flags |= MTL_ENV_ADDEFFECT
-
-        # Misc Byte
-        if mat.ls3d_misc_unlit:       final_flags |= MTL_MISC_UNLIT
-
-        # 3. WRITE DATA
-        f.write(struct.pack("<I", final_flags))
-        f.write(struct.pack("<3f", *env_color))
-        f.write(struct.pack("<3f", *diffuse_color))
-        f.write(struct.pack("<3f", *emission_color))
-        f.write(struct.pack("<f", opacity))
-
-        # 4. TEXTURE NODES
-        env_opacity = 0.0
-        env_tex = ""
-        diffuse_tex = ""
-        alpha_tex = ""
-
-        if mat.use_nodes and mat.node_tree:
-             nodes = mat.node_tree.nodes
-             ls3d_node = next((n for n in nodes if n.type == 'GROUP' and n.node_tree and "LS3D Material Data" in n.node_tree.name), None)
-             
-             if ls3d_node:
-                 if "Diffuse Map" in ls3d_node.inputs and ls3d_node.inputs["Diffuse Map"].is_linked:
-                     tex = self.find_texture_node(ls3d_node.inputs["Diffuse Map"].links[0].from_node)
-                     if tex and tex.image: diffuse_tex = os.path.basename(tex.image.filepath or tex.image.name)
-                 
-                 if mat.ls3d_alpha_enabled and "Alpha Map" in ls3d_node.inputs and ls3d_node.inputs["Alpha Map"].is_linked:
-                     tex = self.find_texture_node(ls3d_node.inputs["Alpha Map"].links[0].from_node)
-                     if tex and tex.image: alpha_tex = os.path.basename(tex.image.filepath or tex.image.name)
-                 
-                 if mat.ls3d_env_enabled and "Reflection" in ls3d_node.inputs and ls3d_node.inputs["Reflection"].is_linked:
-                     link_node = ls3d_node.inputs["Reflection"].links[0].from_node
-                     if link_node.type == 'GROUP' and link_node.node_tree and "LS3D Environment" in link_node.node_tree.name:
-                         if "Intensity" in link_node.inputs: env_opacity = link_node.inputs["Intensity"].default_value
-                         if link_node.inputs["Color"].is_linked:
-                             tex = self.find_texture_node(link_node.inputs["Color"].links[0].from_node)
-                             if tex and tex.image: env_tex = os.path.basename(tex.image.filepath or tex.image.name)
-                     else:
-                         tex = self.find_texture_node(link_node)
-                         if tex and tex.image: 
-                             env_tex = os.path.basename(tex.image.filepath or tex.image.name); env_opacity = 1.0
-
-        if mat.ls3d_env_enabled:
-            f.write(struct.pack("<f", env_opacity))
-            self.write_string(f, env_tex.upper())
-        self.write_string(f, diffuse_tex.upper())
-        if mat.ls3d_alpha_enabled:
-            self.write_string(f, alpha_tex.upper())
-            
-        if mat.ls3d_diff_anim:
-            f.write(struct.pack("<I", mat.ls3d_diff_frame_count))
-            f.write(struct.pack("<H", 0))
-            f.write(struct.pack("<I", mat.ls3d_diff_frame_period))
-            f.write(struct.pack("<I", 0))
-            f.write(struct.pack("<I", 0))
-
-    def serialize_object(self, f, obj, lods):
-        f.write(struct.pack("<H", 0))
-        f.write(struct.pack("<B", len(lods)))
-        
-        # Initialize storage to prevent crash
-        self.current_lod_mappings = [] 
-        self.current_lod_counts = []
-        
-        # Helper: Quantization for vertex deduplication (5 decimals)
-        def quant(val):
-            if abs(val) < 0.00001: val = 0.0
-            return int(val * 100000.0)
-
-        for lod_idx, lod_obj in enumerate(lods):
-            # --- 1. HANDLE FADE DISTANCE ---
-            # STRICTLY READ FROM UI: No auto-correction, no forcing LOD0 to 0.
-            # We trust the user has set the correct value in the panel.
-            dist = getattr(lod_obj, "ls3d_lod_dist", 0.0)
-            
-            f.write(struct.pack("<f", float(dist)))
-            
-            # --- 2. MESH PROCESSING ---
-            try:
-                # Blender 5.0 safe evaluation
-                depsgraph = bpy.context.evaluated_depsgraph_get()
-                eval_obj = lod_obj.evaluated_get(depsgraph)
-                temp_mesh = eval_obj.to_mesh()
-            except:
-                temp_mesh = lod_obj.data.copy()
-
-            # Triangulate
-            bm = bmesh.new()
-            bm.from_mesh(temp_mesh)
-            bmesh.ops.triangulate(bm, faces=bm.faces, quad_method='BEAUTY', ngon_method='BEAUTY')
-            bm.to_mesh(temp_mesh)
-            bm.free()
-            
-            # Access Data Layers
-            uv_layer = temp_mesh.uv_layers.active.data if temp_mesh.uv_layers.active else None
-            unique_verts = {}
-            final_verts = []
-            mat_groups = {}
-            vert_map = {} 
-            
-            # Ensure normals are ready
-            try: temp_mesh.calc_normals_split()
-            except: pass
-            
-            for poly in temp_mesh.polygons:
-                f_indices = []
-                for loop_index in poly.loop_indices:
-                    loop = temp_mesh.loops[loop_index]
-                    v_index = loop.vertex_index
-                    v_co = temp_mesh.vertices[v_index].co
-                    
-                    u, v_coord = (0.0, 0.0)
-                    if uv_layer:
-                        d = uv_layer[loop_index].uv
-                        u, v_coord = d[0], 1.0 - d[1]
-                    
-                    norm = loop.normal
-                    
-                    # Deduplication Key
-                    key = (
-                        quant(v_co.x), quant(v_co.y), quant(v_co.z),
-                        quant(norm.x), quant(norm.y), quant(norm.z),
-                        quant(u), quant(v_coord)
-                    )
-                    
-                    if key in unique_verts:
-                        idx = unique_verts[key]
-                    else:
-                        idx = len(final_verts)
-                        unique_verts[key] = idx
-                        final_verts.append({
-                            'pos': (v_co.x, v_co.z, v_co.y),
-                            'norm': (norm.x, norm.z, norm.y),
-                            'uv': (u, v_coord)
-                        })
-                    
-                    # Map for skinning
-                    if v_index not in vert_map: vert_map[v_index] = []
-                    if idx not in vert_map[v_index]: vert_map[v_index].append(idx)
-                    
-                    f_indices.append(idx)
-                
-                mat_groups.setdefault(poly.material_index, []).append(f_indices)
-            
-            lod_obj.to_mesh_clear()
-            
-            self.current_lod_mappings.append(vert_map)
-            self.current_lod_counts.append(len(final_verts))
-
-            # --- 3. WRITE DATA ---
-            f.write(struct.pack("<H", len(final_verts)))
-            for v in final_verts:
-                f.write(struct.pack("<3f", *v['pos']))
-                f.write(struct.pack("<3f", *v['norm']))
-                f.write(struct.pack("<2f", *v['uv']))
-            
-            f.write(struct.pack("<B", len(mat_groups)))
-            for mat_idx, faces in mat_groups.items():
-                f.write(struct.pack("<H", len(faces)))
-                for tri in faces:
-                    if len(tri) == 3:
-                        f.write(struct.pack("<3H", tri[0], tri[2], tri[1]))
-                
-                mat_id = 0
-                if mat_idx < len(lod_obj.material_slots):
-                    real_mat = lod_obj.material_slots[mat_idx].material
-                    if real_mat in self.materials:
-                        mat_id = self.materials.index(real_mat) + 1
-                f.write(struct.pack("<H", mat_id))
-            
-        return len(lods)
-    
     def serialize_frame(self, f, obj):
-        frame_type = FRAME_VISUAL
-        visual_type = VISUAL_OBJECT
+        # 1. IDENTIFY FRAME TYPE
+        frame_type_str = getattr(obj, "ls3d_frame_type", '1')
+        frame_type = int(frame_type_str)
         
-        r_flag1 = getattr(obj, "render_flags", 128)
-        r_flag2 = getattr(obj, "render_flags2", 42)
-        visual_flags = (r_flag1, r_flag2)
+        # Auto-detect Sector
+        if obj.type == 'MESH' and "sector" in obj.name.lower():
+            frame_type = FRAME_SECTOR
+
+        # --- CRITICAL FIX: SKIP PORTALS ---
+        # Portals are Type 5 (Sector) for UI reasons, but they are NOT frames.
+        # They are data blocks written inside their parent Sector.
+        is_portal_name = bool(re.search(r"_portal\d+$", obj.name, re.IGNORECASE))
+        if frame_type == FRAME_SECTOR and is_portal_name:
+            # Verify it has a parent that is also a sector/compatible
+            if obj.parent: 
+                # Skip this frame, it's already handled by serialize_sector
+                return
+
+        visual_type = 0
+        visual_flags = (0, 0)
         
-        if obj.type == "MESH":
-            if hasattr(obj, "visual_type"):
-                visual_type = int(obj.visual_type)
-                if visual_type in (VISUAL_SINGLEMESH, VISUAL_SINGLEMORPH):
-                    has_arm = any(m.type == 'ARMATURE' and m.object for m in obj.modifiers)
-                    if not has_arm: visual_type = VISUAL_OBJECT
-            else:
-                if obj.modifiers and any(mod.type == "ARMATURE" for mod in obj.modifiers):
-                    visual_type = VISUAL_SINGLEMORPH if obj.data.shape_keys else VISUAL_SINGLEMESH
-                elif "portal" in obj.name.lower(): pass 
-                elif "sector" in obj.name.lower(): frame_type = FRAME_SECTOR
-                elif obj.display_type == "WIRE": frame_type = FRAME_OCCLUDER
-                elif obj.data.shape_keys: visual_type = VISUAL_MORPH
+        if frame_type == FRAME_VISUAL:
+            r_flag1 = getattr(obj, "render_flags", 0)
+            r_flag2 = getattr(obj, "render_flags2", 0)
+            visual_flags = (r_flag1, r_flag2)
+            
+            if obj.type == "MESH":
+                if hasattr(obj, "visual_type"):
+                    visual_type = int(obj.visual_type)
+                    if visual_type in (VISUAL_SINGLEMESH, VISUAL_SINGLEMORPH):
+                        if not any(m.type == 'ARMATURE' and m.object for m in obj.modifiers): 
+                            visual_type = VISUAL_OBJECT 
+                else:
+                    if obj.modifiers and any(mod.type == "ARMATURE" for mod in obj.modifiers):
+                        visual_type = VISUAL_SINGLEMESH
+                    elif obj.data.shape_keys: visual_type = VISUAL_MORPH
         
-        elif obj.type == "EMPTY":
-            if obj.empty_display_type == "CUBE": frame_type = FRAME_DUMMY
-            elif obj.empty_display_type == "PLAIN_AXES": frame_type = FRAME_TARGET
-        
+        # 2. HIERARCHY & MATRIX CALCULATION
         parent_id = 0
+        
+        # Start with the object's World Matrix
+        matrix_to_write = obj.matrix_world.copy()
+        
         if obj.parent:
-            if obj.parent_type == 'BONE' and obj.parent_bone:
-                parent_id = self.joint_map.get(obj.parent_bone, 0)
-            elif obj.parent in self.frames_map:
+            # Case A: Parent is a Bone
+            if obj.parent_type == 'BONE' and obj.parent_bone: 
+                if obj.parent_bone in self.joint_map:
+                    parent_id = self.joint_map[obj.parent_bone]
+                    arm = obj.parent
+                    bone = arm.data.bones[obj.parent_bone]
+                    parent_matrix = arm.matrix_world @ bone.matrix_local
+                    matrix_to_write = parent_matrix.inverted() @ obj.matrix_world
+            
+            # Case B: Parent is an Object
+            elif obj.parent in self.frames_map: 
                 parent_id = self.frames_map[obj.parent]
+                
+                # Check Parent Type
+                is_parent_sector = False
+                p_type_str = getattr(obj.parent, "ls3d_frame_type", '1')
+                if int(p_type_str) == FRAME_SECTOR:
+                    is_parent_sector = True
+                elif "sector" in obj.parent.name.lower():
+                    is_parent_sector = True
+                
+                if is_parent_sector:
+                    # CASE 1: Parent is a SECTOR -> Use WORLD Coordinates
+                    # Sectors are at 0,0,0 in 4DS.
+                    matrix_to_write = obj.matrix_world
+                else:
+                    # CASE 2: Parent is Standard -> Use LOCAL Coordinates
+                    matrix_to_write = obj.parent.matrix_world.inverted() @ obj.matrix_world
         
         self.frames_map[obj] = self.frame_index
         self.frame_index += 1
         
-        if obj.parent and obj.parent_type != 'BONE':
-             matrix = obj.parent.matrix_world.inverted() @ obj.matrix_world
-        elif obj.parent and obj.parent_type == 'BONE':
-             arm = obj.parent
-             bone = arm.data.bones[obj.parent_bone]
-             bone_world = arm.matrix_world @ bone.matrix_local
-             matrix = bone_world.inverted() @ obj.matrix_world
-        else:
-             matrix = obj.matrix_world
-             
-        pos = matrix.to_translation()
-        rot = matrix.to_quaternion()
-        scale = matrix.to_scale()
+        # 3. DECOMPOSE & PREPARE VALUES
+        pos = matrix_to_write.to_translation()
+        rot = matrix_to_write.to_quaternion()
+        scale = matrix_to_write.to_scale()
         
+        cull_flags = getattr(obj, "cull_flags", 0)
+        
+        # CASE 3: Current Object IS A SECTOR -> Force Identity
+        if frame_type == FRAME_SECTOR:
+            pos = Vector((0, 0, 0))
+            rot = Quaternion((1, 0, 0, 0))
+            scale = Vector((1, 1, 1))
+            if cull_flags == 0: cull_flags = 125
+
+        # 4. WRITE HEADER
         f.write(struct.pack("<B", frame_type))
         if frame_type == FRAME_VISUAL:
             f.write(struct.pack("<B", visual_type))
             f.write(struct.pack("<2B", *visual_flags))
             
         f.write(struct.pack("<H", parent_id))
+        
+        # 5. WRITE TRANSFORM (Swap Blender Y/Z -> Mafia Y/Z)
         f.write(struct.pack("<3f", pos.x, pos.z, pos.y))
         f.write(struct.pack("<3f", scale.x, scale.z, scale.y))
         f.write(struct.pack("<4f", rot.w, rot.x, rot.z, rot.y))
-        f.write(struct.pack("<B", getattr(obj, "cull_flags", 128)))
+        
+        f.write(struct.pack("<B", cull_flags))
+        
         self.write_string(f, obj.name)
         self.write_string(f, getattr(obj, "ls3d_user_props", ""))
         
-        if frame_type == FRAME_VISUAL:
+        # 6. WRITE BODY
+        if frame_type == FRAME_VISUAL and obj.type == 'MESH':
             lods = self.lod_map.get(obj, [obj])
             num = self.serialize_object(f, obj, lods)
             
-            if visual_type == VISUAL_BILLBOARD:
-                self.serialize_billboard(f, obj)
-            elif visual_type == VISUAL_MIRROR:
-                self.serialize_mirror(f, obj)
-            elif visual_type == VISUAL_SINGLEMESH:
-                self.serialize_singlemesh(f, obj, num)
-            elif visual_type == VISUAL_SINGLEMORPH:
+            if visual_type == VISUAL_BILLBOARD: self.serialize_billboard(f, obj)
+            elif visual_type == VISUAL_MIRROR: self.serialize_mirror(f, obj)
+            elif visual_type == VISUAL_SINGLEMESH: self.serialize_singlemesh(f, obj, num)
+            elif visual_type == VISUAL_SINGLEMORPH: 
                 self.serialize_singlemesh(f, obj, num)
                 self.serialize_morph(f, obj, num)
-            elif visual_type == VISUAL_MORPH:
-                self.serialize_morph(f, obj, num)
+            elif visual_type == VISUAL_MORPH: self.serialize_morph(f, obj, num)
 
-        elif frame_type == FRAME_SECTOR:
-            self.serialize_sector(f, obj)
-        elif frame_type == FRAME_DUMMY:
-            self.serialize_dummy(f, obj)
-        elif frame_type == FRAME_TARGET:
-            self.serialize_target(f, obj)
-        elif frame_type == FRAME_OCCLUDER:
-            self.serialize_occluder(f, obj)
+        elif frame_type == FRAME_SECTOR: self.serialize_sector(f, obj)
+        elif frame_type == FRAME_DUMMY: self.serialize_dummy(f, obj)
+        elif frame_type == FRAME_TARGET: self.serialize_target(f, obj)
+        elif frame_type == FRAME_OCCLUDER: self.serialize_occluder(f, obj)
+        
+    def get_ordered_portal_verts(self, obj):
+        # 1. Evaluate Mesh
+        try:
+            depsgraph = bpy.context.evaluated_depsgraph_get()
+            eval_obj = obj.evaluated_get(depsgraph)
+            mesh = eval_obj.to_mesh()
+            is_temp_mesh = True
+        except:
+            mesh = obj.data.copy()
+            is_temp_mesh = False
 
+        mesh.transform(obj.matrix_world)
+
+        # 2. Create BMesh to Process Geometry
+        bm = bmesh.new()
+        bm.from_mesh(mesh)
+        
+        # 3. CONVERT TO N-GON (Dissolve Logic)
+        # This fixes issues where a quad portal is split into 2 tris, counting 6 verts instead of 4.
+        
+        # A. Remove Doubles
+      # bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=0.001)
+        
+        # B. Dissolve Internal Edges/Faces to create one boundary face
+        # We try to dissolve everything into as few faces as possible.
+        # If the portal is flat and contiguous, this results in 1 Face.
+        bmesh.ops.dissolve_faces(bm, faces=bm.faces)
+        
+        # 4. Extract Perimeter Vertices
+        bm.verts.ensure_lookup_table()
+        bm.faces.ensure_lookup_table()
+        
+        raw_verts = []
+        normal = Vector((0,0,0))
+        
+        # If successful, we should have 1 face
+        if len(bm.faces) > 0:
+            # Take the largest face if there are disjoint parts (error case, but handle it)
+            target_face = max(bm.faces, key=lambda f: f.calc_area())
+            normal = target_face.normal.copy()
+            
+            for v in target_face.verts:
+                raw_verts.append(v.co.copy())
+        
+        bm.free()
+
+        # 5. Cleanup Temp Mesh
+        if is_temp_mesh:
+            eval_obj.to_mesh_clear()
+        else:
+            bpy.data.meshes.remove(mesh)
+
+        if len(raw_verts) < 3:
+            return [], Vector((0,1,0)), Vector((0,0,0))
+
+        # 6. Angular Sort (Standard Convex Hull sort to match standard)
+        center = sum(raw_verts, Vector()) / len(raw_verts)
+        up = Vector((0, 0, 1))
+        if abs(normal.dot(up)) > 0.99: up = Vector((0, 1, 0))
+        
+        tangent = normal.cross(up).normalized()
+        bitangent = normal.cross(tangent).normalized()
+
+        def get_angle(v):
+            vec = v - center
+            return math.atan2(vec.dot(bitangent), vec.dot(tangent))
+
+        raw_verts.sort(key=get_angle)
+
+        return raw_verts, normal, center
+    
+    def serialize_sector(self, f, obj):
+        # 1. Flags (2x Int32)
+        f1 = getattr(obj, "ls3d_sector_flags1", 0)
+        f2 = getattr(obj, "ls3d_sector_flags2", 0)
+        f.write(struct.pack("<2i", f1, f2))
+        
+        # 2. Geometry Prep
+        try:
+            depsgraph = bpy.context.evaluated_depsgraph_get()
+            eval_obj = obj.evaluated_get(depsgraph)
+            bm = bmesh.new()
+            bm.from_mesh(eval_obj.to_mesh())
+        except:
+            bm = bmesh.new()
+            bm.from_mesh(obj.data)
+
+        # Triangulate (Mandatory)
+        bmesh.ops.triangulate(bm, faces=bm.faces)
+        bm.verts.ensure_lookup_table()
+        bm.faces.ensure_lookup_table()
+        
+        num_verts = len(bm.verts)
+        num_faces = len(bm.faces)
+        
+        f.write(struct.pack("<I", num_verts))
+        f.write(struct.pack("<I", num_faces))
+        
+        # 3. Vertices (World Space, XZY) & Bounds
+        min_b = [float('inf')] * 3
+        max_b = [float('-inf')] * 3
+        
+        world_mat = obj.matrix_world
+        
+        for v in bm.verts:
+            v_world = world_mat @ v.co
+            # Coordinate Swap: Blender (X, Y, Z) -> Mafia (X, Z, Y)
+            vx, vy, vz = v_world.x, v_world.z, v_world.y
+            
+            f.write(struct.pack("<3f", vx, vy, vz))
+            
+            if vx < min_b[0]: min_b[0] = vx
+            if vy < min_b[1]: min_b[1] = vy
+            if vz < min_b[2]: min_b[2] = vz
+            if vx > max_b[0]: max_b[0] = vx
+            if vy > max_b[1]: max_b[1] = vy
+            if vz > max_b[2]: max_b[2] = vz
+
+        # 4. Faces (Swapped Winding: 0, 2, 1)
+        for face in bm.faces:
+            fv = face.verts
+            f.write(struct.pack("<3H", fv[0].index, fv[2].index, fv[1].index))
+            
+        bm.free()
+        
+        # 5. Bounding Box (Written AFTER faces in v29)
+        if num_verts > 0:
+            f.write(struct.pack("<3f", *min_b))
+            f.write(struct.pack("<3f", *max_b))
+        else:
+            f.write(struct.pack("<6f", 0,0,0, 0,0,0))
+            
+        # 6. Portals
+        portals = []
+        for child in obj.children:
+            if re.search(r"_portal\d+$", child.name, re.IGNORECASE):
+                portals.append(child)
+        portals.sort(key=lambda x: x.name)
+        
+        f.write(struct.pack("<B", len(portals)))
+        for p_obj in portals:
+            self.serialize_portal(f, p_obj)
+
+    def serialize_portal(self, f, obj):
+        # 1. Get Geometry
+        verts, normal, center = self.get_ordered_portal_verts(obj)
+        
+        if len(verts) < 3:
+            f.write(struct.pack("<B", 0))    # nVerts
+            f.write(struct.pack("<I", 0))    # Flags
+            f.write(struct.pack("<8f", 0,0,0,0,0,0,0,0)) # Near, Far, D, Normal
+            return
+
+        # 2. Transform to Mafia Space (X, Z, Y)
+        mafia_verts = [Vector((v.x, v.z, v.y)) for v in verts]
+        mafia_normal = Vector((normal.x, normal.z, normal.y))
+        mafia_point = mafia_verts[0]
+        
+        # 3. Calculate Math (Max4ds Logic)
+        stored_normal = -mafia_normal
+        stored_d = mafia_point.dot(mafia_normal)
+        
+        # 4. Get Properties
+        flags = getattr(obj, "ls3d_portal_flags", 0)
+        near = getattr(obj, "ls3d_portal_near", 0.0)
+        far = getattr(obj, "ls3d_portal_far", 0.0)
+        
+        # 5. WRITE STRUCTURE
+        
+        # A. Count (1 byte)
+        f.write(struct.pack("<B", len(mafia_verts)))
+        
+        # B. Flags (4 bytes)
+        f.write(struct.pack("<I", flags))
+        
+        # C. Ranges (4 bytes each)
+        f.write(struct.pack("<f", near))
+        f.write(struct.pack("<f", far))
+        
+        # D. Plane (16 bytes)
+        # Normal (3 floats), D (float)
+        f.write(struct.pack("<3f", stored_normal.x, stored_normal.y, stored_normal.z))
+        f.write(struct.pack("<f", stored_d))
+        
+        # E. Vertices
+        verts_portal = list(mafia_verts)
+        
+        for v in verts_portal:
+            f.write(struct.pack("<3f", v.x, v.y, v.z))
+
+    def serialize_material(self, f, mat, mat_index):
+        # 1. Flags (Masking Signed->Unsigned)
+        signed_flags = mat.ls3d_material_flags
+        flags = signed_flags & 0xFFFFFFFF
+        f.write(struct.pack("<I", flags))
+
+        # 2. Colors
+        amb = getattr(mat, "ls3d_ambient_color", (0.5,0.5,0.5))
+        dif = getattr(mat, "ls3d_diffuse_color", (1,1,1))
+        emi = getattr(mat, "ls3d_emission_color", (0,0,0))
+        
+        # 3. Retrieve Opacity & Textures from Nodes
+        opacity = 1.0
+        env_intensity = 0.0
+        diff_tex = ""
+        alpha_tex = ""
+        env_tex = ""
+
+        if mat.use_nodes:
+            main_node = None
+            for n in mat.node_tree.nodes:
+                if n.type == 'GROUP' and n.node_tree and "LS3D Material Data" in n.node_tree.name:
+                    main_node = n
+                    break
+            
+            if main_node:
+                # Get Opacity from Node Input
+                if "Opacity" in main_node.inputs:
+                    opacity = main_node.inputs["Opacity"].default_value / 100.0
+                
+                def find_image(socket_name):
+                    if socket_name not in main_node.inputs: return None, None
+                    socket = main_node.inputs[socket_name]
+                    if not socket.is_linked: return None, None
+                    link_node = socket.links[0].from_node
+                    if link_node.type == 'TEX_IMAGE' and link_node.image:
+                        return link_node, None
+                    if link_node.type == 'GROUP' and link_node.node_tree and "LS3D Environment" in link_node.node_tree.name:
+                        return None, link_node 
+                    return None, None
+
+                d_node, _ = find_image("Diffuse Map")
+                if d_node: diff_tex = os.path.basename(d_node.image.filepath or d_node.image.name)
+                
+                a_node, _ = find_image("Alpha Map")
+                if a_node: alpha_tex = os.path.basename(a_node.image.filepath or a_node.image.name)
+                
+                _, env_grp_node = find_image("Environment Map")
+                if env_grp_node:
+                    if "Intensity" in env_grp_node.inputs:
+                        env_intensity = env_grp_node.inputs["Intensity"].default_value
+                    if "Color" in env_grp_node.inputs and env_grp_node.inputs["Color"].is_linked:
+                        img_node = env_grp_node.inputs["Color"].links[0].from_node
+                        if img_node.type == 'TEX_IMAGE' and img_node.image:
+                            env_tex = os.path.basename(img_node.image.filepath or img_node.image.name)
+
+        f.write(struct.pack("<3f", *amb))
+        f.write(struct.pack("<3f", *dif))
+        f.write(struct.pack("<3f", *emi))
+        f.write(struct.pack("<f", opacity))
+
+        # 4. Write Texture Block
+        has_env = (flags & MTL_ENV_ENABLE) != 0
+        has_diff = (flags & MTL_DIFFUSE_ENABLE) != 0
+        has_alpha_tex = (flags & MTL_ALPHA_ENABLE) and (flags & MTL_ALPHATEX)
+
+        if has_env:
+            f.write(struct.pack("<f", env_intensity))
+            self.write_string(f, env_tex.upper())
+
+        if has_diff:
+            self.write_string(f, diff_tex.upper())
+
+        if has_alpha_tex:
+            self.write_string(f, alpha_tex.upper())
+
+        # Padding Byte logic: 
+        # Only write 0 if NO Diffuse AND NO Alpha Texture strings were written.
+        # Env Map does not count.
+        if not has_diff and not has_alpha_tex:
+            f.write(struct.pack("B", 0))
+
+        # 5. Anim Data (Exclusive Write + Masking)
+        if flags & MTL_ALPHA_ANIMATED:
+            f.write(struct.pack("<I", mat.ls3d_alpha_anim_frames & 0xFFFFFFFF))
+            f.write(struct.pack("<H", 0))
+            f.write(struct.pack("<I", mat.ls3d_alpha_anim_period & 0xFFFFFFFF))
+            f.write(struct.pack("<Q", 0))
+
+        elif flags & MTL_DIFFUSE_ANIMATED:
+            f.write(struct.pack("<I", mat.ls3d_diffuse_anim_frames & 0xFFFFFFFF))
+            f.write(struct.pack("<H", 0))
+            f.write(struct.pack("<I", mat.ls3d_diffuse_anim_period & 0xFFFFFFFF))
+            f.write(struct.pack("<Q", 0))
+
+    def serialize_object(self, f, obj, lods):
+        """
+        Serializes the geometry block for an object (FRAME_VISUAL).
+        Uses Blender's native mesh data to ensure robust indexing.
+        Fixed for Blender 5.0 (removed calc_normals_split).
+        """
+
+        # InstanceID: 0 = Unique Geometry (Source)
+        f.write(struct.pack("<H", 0))
+
+        # LOD Count
+        f.write(struct.pack("<B", len(lods)))
+        
+        # Reset mappings for this object
+        self.current_lod_mappings = [] 
+        self.current_lod_counts = []
+
+        for lod_idx, lod_obj in enumerate(lods):
+            # --- 1. HANDLE FADE DISTANCE ---
+            dist = getattr(lod_obj, "ls3d_lod_dist", 0.0)
+            f.write(struct.pack("<f", float(dist)))
+            
+            # --- 2. MESH PROCESSING & PREPARATION ---
+            try:
+                # Get the evaluated mesh with all modifiers applied
+                depsgraph = bpy.context.evaluated_depsgraph_get()
+                eval_obj = lod_obj.evaluated_get(depsgraph)
+                temp_mesh = eval_obj.to_mesh()
+            except Exception as e:
+                print(f"LS3D Error: Failed to evaluate mesh '{lod_obj.name}': {e}")
+                # Fallback to data if evaluation fails (rare)
+                temp_mesh = lod_obj.data.copy()
+
+            # Generate loop triangles (Face triangulation data)
+            # In Blender 5.0, normals are already calculated on the eval mesh
+            temp_mesh.calc_loop_triangles()
+
+            uv_layer = temp_mesh.uv_layers.active # Get active UV layer
+            
+            # Collect Loop Data (Normals & UVs)
+            # We map Vertex Index -> {Normal, UV}
+            # Note: This approach assumes 1 set of UV/Normal per vertex (Hard Seams split vertices in game engines usually)
+            # For 4DS, if we strictly use mesh.vertices, we are sharing attributes.
+            vertex_loop_data = {} 
+            for loop in temp_mesh.loops:
+                v_idx = loop.vertex_index
+                if v_idx not in vertex_loop_data:
+                    # Get UV (Flip V for Mafia: 1.0 - V)
+                    u, v_coord = (0.0, 0.0)
+                    if uv_layer:
+                        uv_coords = uv_layer.data[loop.index].uv
+                        u, v_coord = uv_coords.x, 1.0 - uv_coords.y
+                    
+                    # loop.normal contains the split normal (smooth/sharp)
+                    vertex_loop_data[v_idx] = {
+                        'norm': loop.normal, 
+                        'uv': (u, v_coord)
+                    }
+
+            # Map for morph targets (Identity, since we use 1:1 vertex list)
+            identity_vert_map = {v.index: [v.index] for v in temp_mesh.vertices}
+            self.current_lod_mappings.append(identity_vert_map)
+            self.current_lod_counts.append(len(temp_mesh.vertices))
+
+            # --- 3. WRITE VERTEX DATA ---
+            num_exported_verts = len(temp_mesh.vertices)
+            
+            # Check Limits (UInt16 = 65535)
+            if num_exported_verts > 65535:
+                print(f"LS3D Error: Object '{lod_obj.name}' has {num_exported_verts} vertices (Limit 65535).")
+                eval_obj.to_mesh_clear()
+                return 0 
+                
+            f.write(struct.pack("<H", num_exported_verts))
+            
+            for v_idx, vert in enumerate(temp_mesh.vertices):
+                pos = vert.co
+                
+                # Fetch attributes
+                if v_idx in vertex_loop_data:
+                    norm = vertex_loop_data[v_idx]['norm']
+                    uv = vertex_loop_data[v_idx]['uv']
+                else:
+                    norm = vert.normal 
+                    uv = (0.0, 0.0)
+
+                # Coordinate Swap: Blender (X, Y, Z) -> Mafia (X, Z, Y)
+                f.write(struct.pack("<3f", pos.x, pos.z, pos.y))
+                f.write(struct.pack("<3f", norm.x, norm.z, norm.y))
+                f.write(struct.pack("<2f", uv[0], uv[1]))
+            
+            # --- 4. WRITE FACE DATA ---
+            # Group triangles by Material Index
+            mat_triangle_groups = {} 
+            for tri in temp_mesh.loop_triangles:
+                mat_idx = tri.material_index
+                if mat_idx < 0: mat_idx = 0 
+                mat_triangle_groups.setdefault(mat_idx, []).append(tri.vertices)
+            
+            num_material_groups = len(mat_triangle_groups)
+            f.write(struct.pack("<B", num_material_groups))
+            
+            # Sort keys to ensure deterministic export order
+            sorted_mat_indices = sorted(mat_triangle_groups.keys())
+
+            for mat_idx in sorted_mat_indices:
+                triangles = mat_triangle_groups[mat_idx]
+                
+                f.write(struct.pack("<H", len(triangles)))
+                
+                for tri_verts in triangles: 
+                    # Winding Swap: (0, 1, 2) -> (0, 2, 1)
+                    f.write(struct.pack("<3H", tri_verts[0], tri_verts[2], tri_verts[1]))
+                
+                # Resolve Material ID (1-based)
+                mat_id = 0
+                if 0 <= mat_idx < len(lod_obj.material_slots):
+                    real_mat = lod_obj.material_slots[mat_idx].material
+                    if real_mat in self.materials:
+                        mat_id = self.materials.index(real_mat) + 1
+                f.write(struct.pack("<H", mat_id))
+            
+            # Cleanup
+            eval_obj.to_mesh_clear()
+            
+        return len(lods)
+    
     def serialize_billboard(self, f, obj):
-        # Enum is '0','1','2' string. File needs 1-based index integer.
-        # X=0(1), Z=1(2), Y=2(3)
-        axis = int(getattr(obj, "rot_axis", '1')) + 1
-        mode = int(getattr(obj, "rot_mode", '0')) + 1
-        f.write(struct.pack("<I", axis))
-        f.write(struct.pack("<B", mode))
+        mode_prop = getattr(obj, "rot_mode", '1')
+        
+        if mode_prop == '1':
+            mafia_axis = 0
+            axis_mode = 0
+        else:
+            axis_mode = 1
+            axis_prop = getattr(obj, "rot_axis", '2')
+            if axis_prop == '1':
+                mafia_axis = 0  # X
+            elif axis_prop == '2':
+                mafia_axis = 1  # Blender Z (up) -> Mafia Y (up)
+            elif axis_prop == '3':
+                mafia_axis = 2  # Blender Y -> Mafia Z
+            else:
+                mafia_axis = 1  # Default to Mafia Y
+        
+        f.write(struct.pack("<I", mafia_axis))
+        f.write(struct.pack("<?", bool(axis_mode)))
 
     def serialize_mirror(self, f, obj):
         # Bounds
@@ -969,63 +1517,6 @@ class The4DSExporter:
             f.write(struct.pack("<3H", face.verts[0].index, face.verts[2].index, face.verts[1].index))
         bm.free()
 
-    def serialize_sector(self, f, obj):
-        # Flags
-        f1 = getattr(obj, "ls3d_sector_flags1", 2049)
-        f2 = getattr(obj, "ls3d_sector_flags2", 0)
-        f.write(struct.pack("<2I", f1, f2))
-        
-        # Mesh
-        mesh = obj.data
-        bm = bmesh.new()
-        bm.from_mesh(mesh)
-        bm.verts.ensure_lookup_table()
-        
-        f.write(struct.pack("<I", len(bm.verts)))
-        f.write(struct.pack("<I", len(bm.faces)))
-        
-        for vert in bm.verts:
-            f.write(struct.pack("<3f", vert.co.x, vert.co.z, vert.co.y))
-        for face in bm.faces:
-            f.write(struct.pack("<3H", face.verts[0].index, face.verts[2].index, face.verts[1].index))
-            
-        # Bounds
-        min_b = getattr(obj, "bbox_min", (0,0,0))
-        max_b = getattr(obj, "bbox_max", (0,0,0))
-        f.write(struct.pack("<3f", min_b[0], min_b[2], min_b[1]))
-        f.write(struct.pack("<3f", max_b[0], max_b[2], max_b[1]))
-        
-        # Portals
-        portals = [c for c in obj.children if "portal" in c.name.lower() or "plane" in c.name.lower()]
-        f.write(struct.pack("<B", len(portals)))
-        
-        for p_obj in portals:
-            self.serialize_portal(f, p_obj)
-        
-        bm.free()
-
-    def serialize_portal(self, f, obj):
-        mesh = obj.data
-        bm = bmesh.new()
-        bm.from_mesh(mesh)
-        
-        f.write(struct.pack("<B", len(bm.verts)))
-        
-        # Flags, Near, Far
-        f.write(struct.pack("<I", getattr(obj, "ls3d_portal_flags", 4)))
-        f.write(struct.pack("<f", getattr(obj, "ls3d_portal_near", 0.0)))
-        f.write(struct.pack("<f", getattr(obj, "ls3d_portal_far", 100.0)))
-        
-        # Normal
-        norm = obj.matrix_world.to_quaternion() @ Vector((0,0,1))
-        f.write(struct.pack("<3f", norm.x, norm.z, norm.y))
-        f.write(struct.pack("<f", 0.0)) # Dot
-        
-        for v in bm.verts:
-            f.write(struct.pack("<3f", v.co.x, v.co.z, v.co.y))
-            
-        bm.free()
-    
     def serialize_joints(self, f, armature):
         # We don't write the Armature Object itself as a frame, 
         # but we need to pass its hierarchy context.
@@ -1103,24 +1594,34 @@ class The4DSExporter:
         with open(self.filepath, "wb") as f:
             self.serialize_header(f)
             
+            # 1. Materials
             self.materials = self.collect_materials()
             f.write(struct.pack("<H", len(self.materials)))
             for i, mat in enumerate(self.materials):
                 self.serialize_material(f, mat, i + 1)
             
+            # 2. Identify Special Objects
             lod_objects_set = self.collect_lods()
             
-            # SAFE CHECK: Use object names to check existence in scene
+            # Filter Portals (They are data blocks, not Frames)
+            portal_objects = set()
+            for obj in self.objects_to_export:
+                if re.search(r"_portal\d+$", obj.name, re.IGNORECASE):
+                    if obj.parent and getattr(obj.parent, "ls3d_frame_type", '1') == '5':
+                        portal_objects.add(obj)
+
+            # 3. Build Main Frame List
             scene_names = set(o.name for o in bpy.context.scene.objects)
             
             raw_objects = [
                 obj for obj in self.objects_to_export
                 if obj.name in scene_names 
                 and obj not in lod_objects_set
+                and obj not in portal_objects 
                 and obj.type in ("MESH", "EMPTY", "ARMATURE")
             ]
             
-            # HIERARCHY SORT
+            # 4. Hierarchy Sort
             self.objects = []
             roots = [o for o in raw_objects if (not o.parent) or (o.parent not in raw_objects)]
             roots.sort(key=lambda x: x.name)
@@ -1136,170 +1637,52 @@ class The4DSExporter:
             for root in roots:
                 sort_hierarchy(root)
             
+            # Leftovers
             seen = set(self.objects)
             leftovers = [o for o in raw_objects if o not in seen]
             self.objects.extend(leftovers)
 
-            armatures = [obj for obj in self.objects if obj.type == "ARMATURE"]
-            visual_frames = [obj for obj in self.objects if obj.type != "ARMATURE"]
+            # 5. Count Frames
+            visual_frames_count = 0
+            for obj in self.objects:
+                if obj.type == "ARMATURE":
+                    visual_frames_count += len(obj.data.bones)
+                else:
+                    visual_frames_count += 1
             
-            bone_count = sum(len(arm.data.bones) for arm in armatures)
-            total_frames = len(visual_frames) + bone_count
-            
-            f.write(struct.pack("<H", total_frames))
+            f.write(struct.pack("<H", visual_frames_count))
             
             self.frame_index = 1
             self.frames_map = {} 
             self.joint_map = {}
             
+            # 6. Write Frames
             for obj in self.objects:
                 if obj.type == "ARMATURE":
                     self.serialize_joints(f, obj)
                 else:
                     self.serialize_frame(f, obj)
-                
-            f.write(struct.pack("<?", False))
-
-class The4DSPanelMaterial(bpy.types.Panel):
-    bl_label = "4DS Material Properties"
-    bl_idname = "MATERIAL_PT_4ds"
-    bl_space_type = 'PROPERTIES'
-    bl_region_type = 'WINDOW'
-    bl_context = "material"
-    
-    def draw(self, context):
-        mat = context.material
-        if not mat: return
-        layout = self.layout
-        
-        # 2. Colors
-        box = layout.box()
-        box.label(text="-Colors-", icon='COLOR')
-        col = box.column(align=True)
-        col.prop(mat, "ls3d_diffuse_color", text="Diffuse")
-        col.prop(mat, "ls3d_ambient_color", text="Environment")
-        col.prop(mat, "ls3d_emission_color", text="Emission")
-        
-        # 3. Textures
-        layout.label(text="-Textures-", icon='TEXTURE')
-        
-        # A. Diffuse
-        box = layout.box()
-        box.label(text="Diffuse", icon='SHADING_TEXTURE')
-        box.prop(mat, "ls3d_diff_enabled")
-        
-        col = box.column(align=True)
-        r = col.row()
-        r.prop(mat, "ls3d_diff_colored")
-        r.prop(mat, "ls3d_diff_anim")
             
-        r = col.row()
-        r.prop(mat, "ls3d_diff_mipmap")
-        r.prop(mat, "ls3d_diff_2sided")
-
-        if mat.ls3d_diff_anim:
-            r = col.row(align=True)
-            r.prop(mat, "ls3d_diff_frame_count")
-            r.prop(mat, "ls3d_diff_frame_period")
-        
-        # B. Environment
-        box = layout.box()
-        box.label(text="Environment", icon='WORLD_DATA')
-        box.prop(mat, "ls3d_env_enabled")
-        
-        col = box.column(align=True)
-        r = col.row()
-        r.prop(mat, "ls3d_env_overlay")
-        r.prop(mat, "ls3d_env_multiply")
-        r.prop(mat, "ls3d_env_additive")
-        
-        r = col.row()
-        r.prop(mat, "ls3d_env_yproj")
-        r.prop(mat, "ls3d_env_ydet")
-        r.prop(mat, "ls3d_env_zdet")
-        
-        if mat.ls3d_env_enabled:
-            box.separator()
-            box.operator("node.add_ls3d_env_setup", icon='NODETREE', text="Add Reflection Nodes")
-        
-        # C. Alpha
-        box = layout.box()
-        box.label(text="Alpha", icon='TRIA_RIGHT')
-        box.prop(mat, "ls3d_alpha_enabled")
-        
-        col = box.column(align=True)
-        r = col.row()
-        r.prop(mat, "ls3d_alpha_effect")
-        r.prop(mat, "ls3d_alpha_colorkey")
-        
-        r = col.row()
-        r.prop(mat, "ls3d_alpha_addmix")
-        r.prop(mat, "ls3d_alpha_anim")
-        
-        col.prop(mat, "ls3d_alpha_imgalpha")
-        
-        # D. Misc / Reflection Calc
-        box = layout.box()
-        box.label(text="Misc / Unknown")
-        col = box.column(align=True)
-        
-        col.prop(mat, "ls3d_disable_tex")
-        col.separator()
-        col.prop(mat, "ls3d_misc_unlit")
-        col.prop(mat, "ls3d_misc_zwrite")
-        
-        r = col.row()
-        r.prop(mat, "ls3d_misc_tile_u")
-        r.prop(mat, "ls3d_misc_tile_v")
-        
-        # Renamed properties used here (previously unk_12/13/14)
-        r = col.row()
-        r.prop(mat, "ls3d_calc_reflect_y")
-        r.prop(mat, "ls3d_proj_reflect_y")
-        r.prop(mat, "ls3d_proj_reflect_z")
-
-        # Master Node Button
-        layout.separator()
-        layout.operator("node.add_ls3d_group", icon='NODETREE', text="Add LS3D Material Data Node")
+            # Animation Flag
+            is_anim = getattr(bpy.context.scene, "ls3d_is_animated", False)
+            f.write(struct.pack("<?", is_anim))
 
 class The4DSImporter:
     def __init__(self, filepath):
         self.filepath = filepath
         self.texture_cache = {}
         
-        # 1. Determine Paths
-        # E.g. filepath = "D:\Mafia\models\car.4ds"
-        model_dir = os.path.dirname(filepath)
+        # Access the preferences strictly using the module name
+        addon_prefs = bpy.context.preferences.addons.get(__name__)
         
-        # FIX: Go back ONE level (models -> Mafia), not two
-        self.base_dir = os.path.abspath(os.path.join(model_dir, ".."))
-        print(f"Base directory set to: {self.base_dir}")
-        
-        self.maps_dir = None
-        
-        # Helper to find folder case-insensitively
-        def find_folder(base, target_name):
-            if not os.path.exists(base): return None
-            try:
-                for name in os.listdir(base):
-                    if name.lower() == target_name.lower() and os.path.isdir(os.path.join(base, name)):
-                        return os.path.join(base, name)
-            except OSError:
-                pass
-            return None
-
-        # 1. Look for 'maps' in the parent directory (Standard Mafia structure)
-        self.maps_dir = find_folder(self.base_dir, "maps")
-        
-        # 2. Fallback: Look for 'maps' in the same directory as the model
-        if not self.maps_dir:
-            self.maps_dir = find_folder(model_dir, "maps")
-            
-        if self.maps_dir:
-            print(f"Maps directory found at: {self.maps_dir}")
+        if addon_prefs:
+            self.maps_dir = addon_prefs.preferences.textures_path
         else:
-            # Keep original warning message style
-            print(f"Warning: 'maps' folder not found at {os.path.join(self.base_dir, 'maps')}. Textures may not load.")
+            self.maps_dir = None
+            
+        if not self.maps_dir or not os.path.exists(self.maps_dir):
+            print(f"LS3D Warning: Provided texture path is invalid: {self.maps_dir}")
+            self.maps_dir = None
 
         self.version = 0
         self.materials = []
@@ -1313,6 +1696,29 @@ class The4DSImporter:
         self.armature = None
         self.parenting_info = []
         self.frame_types = {}
+        self.frame_matrices = {}
+
+    def get_or_load_texture(self, filename):
+        if not self.maps_dir:
+            return None
+            
+        base_name = os.path.basename(filename)
+        norm_key = base_name.lower()
+        
+        if norm_key not in self.texture_cache:
+            # Check ONLY in the maps_dir folder
+            full_path = self.get_real_file_path(self.maps_dir, base_name)
+            
+            if full_path:
+                try:
+                    image = bpy.data.images.load(full_path, check_existing=True)
+                    self.texture_cache[norm_key] = image
+                except:
+                    self.texture_cache[norm_key] = None
+            else:
+                self.texture_cache[norm_key] = None
+                    
+        return self.texture_cache[norm_key]
 
     def get_real_file_path(self, directory, filename):
         """Finds a file in a directory case-insensitively."""
@@ -1335,43 +1741,116 @@ class The4DSImporter:
             
         return None
 
+    # --- MAIN IMPORT LOOP WITH LOGGING ---
     def import_file(self):
-        with open(self.filepath, "rb") as f:
-            header = f.read(4)
-            if header != b"4DS\0":
-                print("Error: Not a valid 4DS file (invalid header)")
-                return
-            self.version = struct.unpack("<H", f.read(2))[0]
-            if self.version != VERSION_MAFIA:
-                print(f"Error: Unsupported 4DS version {self.version}. Only version {VERSION_MAFIA} (Mafia) is supported.")
-                return
-            f.read(8)
-            mat_count = struct.unpack("<H", f.read(2))[0]
-            print(f"Reading {mat_count} materials...")
-            self.materials = []
-            for _ in range(mat_count):
-                mat = self.deserialize_material(f)
-                self.materials.append(mat)
-            frame_count = struct.unpack("<H", f.read(2))[0]
-            print(f"Reading {frame_count} frames...")
-            frames = []
-            for i in range(frame_count):
-                print(f"Processing frame {i+1}/{frame_count}...")
-                if not self.deserialize_frame(f, self.materials, frames):
-                    print(f"Failed to deserialize frame {i+1}")
-                    continue
-            if self.armature and self.joints:
-                print("Building armature...")
-                self.build_armature()
-                print("Applying skinning...")
-                for mesh, vertex_groups, bone_to_parent in self.skinned_meshes:
-                    self.apply_skinning(mesh, vertex_groups, bone_to_parent)
-            print("Applying parenting...")
-            self.apply_deferred_parenting()
-            is_animated = struct.unpack("<B", f.read(1))[0]
-            if is_animated:
-                print("Animation data present (not supported)")
-            print("Import completed.")
+        filename = os.path.basename(self.filepath)
+        
+        # Initial Console Log
+        print("\n" + "="*60)
+        print(f"LS3D IMPORT STARTED: {filename}")
+        print("="*60)
+
+        # Setup Progress Bar
+        wm = bpy.context.window_manager
+        wm.progress_begin(0, 100)
+        
+        # Change Cursor to Wait
+        bpy.context.window.cursor_set("WAIT")
+
+        try:
+            with open(self.filepath, "rb") as f:
+                # 1. Header
+                header = f.read(4)
+                if header != b"4DS\0":
+                    print("Error: Not a valid 4DS file (invalid header)")
+                    return
+                
+                self.version = struct.unpack("<H", f.read(2))[0]
+                if self.version != 29: # VERSION_MAFIA
+                    print(f"Error: Unsupported 4DS version {self.version}. Only version 29 is supported.")
+                    return
+                
+                f.read(8) # Skip Time
+
+                # 2. Materials
+                mat_count = struct.unpack("<H", f.read(2))[0]
+                print(f"--- READING MATERIALS ({mat_count}) ---")
+                
+                self.materials = []
+                for i in range(mat_count):
+                    # Update Progress (First 30% of bar is materials)
+                    wm.progress_update((i / mat_count) * 30)
+                    
+                    try:
+                        mat = self.deserialize_material(f)
+                        self.materials.append(mat)
+                        
+                        # LOGGING: Material Name and Flags
+                        unsigned_flags = mat.ls3d_material_flags & 0xFFFFFFFF
+                        print(f"  [Mat {i+1:03d}/{mat_count}] '{mat.name}' | Flags: {hex(unsigned_flags)}")
+                        
+                    except Exception as e:
+                        print(f"  [Mat {i+1:03d}] ERROR: {e}")
+                        # Append dummy to keep index alignment
+                        self.materials.append(bpy.data.materials.new(f"Error_Mat_{i}"))
+
+                # 3. Frames
+                frame_count = struct.unpack("<H", f.read(2))[0]
+                print(f"--- READING FRAMES ({frame_count}) ---")
+                
+                frames = []
+                for i in range(frame_count):
+                    # Update Progress (Remaining 70% of bar)
+                    wm.progress_update(30 + ((i / frame_count) * 70))
+                    
+                    # LOGGING: Frame Index
+                    print(f"  [Frame {i+1:03d}/{frame_count}] Processing...")
+                    
+                    if not self.deserialize_frame(f, self.materials, frames):
+                        print(f"    !!! Failed to deserialize frame {i+1} !!!")
+                        continue
+
+                # 4. Post Processing
+                print("--- POST PROCESSING ---")
+                
+                if self.armature and self.joints:
+                    print("  > Building armature...")
+                    self.build_armature()
+                    print("  > Applying skinning...")
+                    for mesh, vertex_groups, bone_to_parent in self.skinned_meshes:
+                        self.apply_skinning(mesh, vertex_groups, bone_to_parent)
+                
+                print("  > Applying hierarchy...")
+                self.apply_deferred_parenting()
+                
+                # Check EOF Animation Flag
+                try:
+                    f.seek(-1, 2) 
+                    last_byte = f.read(1)
+                    if last_byte:
+                        val = struct.unpack("<B", last_byte)[0]
+                        if val == 1:
+                            bpy.context.scene.ls3d_is_animated = True
+                            print("  > Animation flag: ACTIVE")
+                        else:
+                            bpy.context.scene.ls3d_is_animated = False
+                            print("  > Animation flag: INACTIVE")
+                except Exception as e:
+                    print(f"  > Warning checking EOF flag: {e}")
+                
+                print(f"Import completed successfully: {filename}")
+
+        except Exception as e:
+            print(f"\nCRITICAL IMPORT ERROR: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        finally:
+            # Cleanup UI state even if error occurs
+            print("="*60)
+            wm.progress_end()
+            bpy.context.window.cursor_set("DEFAULT")
+
     def parent_to_bone(self, obj, bone_name):
         bpy.ops.object.select_all(action="DESELECT")
         self.armature.select_set(True)
@@ -1397,8 +1876,18 @@ class The4DSImporter:
         unpacked = struct.unpack(f"{length}c", bytes_data)
         return "".join(c.decode("windows-1250", errors='replace') for c in unpacked)
     def read_string(self, f):
-        length = struct.unpack("B", f.read(1))[0]
-        return self.read_string_fixed(f, length) if length > 0 else ""
+        # Read 1 byte for length
+        length_byte = f.read(1)
+        if not length_byte: return ""
+        length = struct.unpack("B", length_byte)[0]
+        
+        if length == 0: return ""
+        
+        # Read string bytes
+        bytes_data = f.read(length)
+        
+        # Decode as Windows-1250 (Standard for Mafia) to preserve accents
+        return bytes_data.decode("windows-1250", errors="replace")
     
     def get_color_key(self, filename):
         """
@@ -1439,142 +1928,100 @@ class The4DSImporter:
             print(f"Error reading Color Key from {full_path}: {e}")
             
         return None
-            
-    def get_or_load_texture(self, filename):
-        # Normalize cache key
-        base_name = os.path.basename(filename)
-        norm_key = base_name.lower()
-        
-        if norm_key not in self.texture_cache:
-            full_path = None
-            
-            if self.maps_dir:
-                full_path = self.get_real_file_path(self.maps_dir, base_name)
-            
-            if full_path:
-                try:
-                    image = bpy.data.images.load(full_path, check_existing=True)
-                    self.texture_cache[norm_key] = image
-                except Exception as e:
-                    print(f"Warning: Failed to load texture {full_path}: {e}")
-                    self.texture_cache[norm_key] = None
-            else:
-                # Keep original warning style, but specific to filename
-                print(f"Warning: Texture file not found: {os.path.join(self.base_dir, 'maps', base_name)}")
-                self.texture_cache[norm_key] = None
-                
-        return self.texture_cache[norm_key]
     
     def set_material_data(
-        self, material, diffuse, alpha_tex, env_tex, emission, alpha, metallic, use_color_key
+        self, material, diffuse, alpha_tex, env_tex, emission, opacity, metallic, use_color_key
     ):
         material.use_nodes = True
         nodes = material.node_tree.nodes
         links = material.node_tree.links
         nodes.clear()
         
-        principled = nodes.new("ShaderNodeBsdfPrincipled")
-        principled.location = (0, 0)
-        principled.inputs["Emission Color"].default_value = (*emission, 1.0)
-        principled.inputs["Metallic"].default_value = 0.0
-        principled.inputs["Specular IOR Level"].default_value = 0.0
-        principled.inputs["Roughness"].default_value = 1.0
+        # Create Group
+        group_data = get_or_create_ls3d_group()
+        group_node = nodes.new('ShaderNodeGroup')
+        group_node.node_tree = group_data
+        group_node.location = (0, 0)
+        group_node.width = 240
         
-        output = nodes.new("ShaderNodeOutputMaterial")
+        # Set Opacity Default Value
+        if "Opacity" in group_node.inputs:
+            group_node.inputs["Opacity"].default_value = opacity * 100.0
+
+        output = nodes.new('ShaderNodeOutputMaterial')
         output.location = (300, 0)
+        links.new(group_node.outputs["BSDF"], output.inputs["Surface"])
         
-        base_color_input = principled.inputs["Base Color"]
-        
-        # Diffuse Texture
+        # Diffuse
         if diffuse:
             diffuse = diffuse.lower()
-            tex_image = nodes.new("ShaderNodeTexImage")
-            tex_image.image = self.get_or_load_texture(diffuse)
-            tex_image.location = (-300, 0)
-         
-            if tex_image.image:
-                links.new(tex_image.outputs["Color"], principled.inputs["Base Color"])
+            img = self.get_or_load_texture(diffuse)
             
-            # Color Key (Alpha Clip)
+            tex_node = nodes.new('ShaderNodeTexImage')
+            tex_node.image = img
+            tex_node.location = (-400, 100)
+            tex_node.label = f"Diffuse: {diffuse}"
+            
+            if "Diffuse Map" in group_node.inputs:
+                links.new(tex_node.outputs["Color"], group_node.inputs["Diffuse Map"])
+
             if use_color_key:
-                color_key = self.get_color_key(os.path.join(self.base_dir, "maps", diffuse))
-                if color_key:
-                    normalized_sum = color_key[0] + color_key[1] + color_key[2]
-                    threshold_value = 0.3 if diffuse == "2kolo3.bmp" else 0.015 + 0.45 * normalized_sum
-                    
-                    separate_rgb = nodes.new("ShaderNodeSeparateColor")
-                    separate_rgb.location = (-100, 200)
-                    links.new(tex_image.outputs["Color"], separate_rgb.inputs["Color"])
-                    
-                    math_r = nodes.new("ShaderNodeMath"); math_r.operation = "SUBTRACT"; math_r.inputs[0].default_value = color_key[0]
-                    links.new(separate_rgb.outputs["Red"], math_r.inputs[1])
-                    
-                    math_g = nodes.new("ShaderNodeMath"); math_g.operation = "SUBTRACT"; math_g.inputs[0].default_value = color_key[1]
-                    links.new(separate_rgb.outputs["Green"], math_g.inputs[1])
-                    
-                    math_b = nodes.new("ShaderNodeMath"); math_b.operation = "SUBTRACT"; math_b.inputs[0].default_value = color_key[2]
-                    links.new(separate_rgb.outputs["Blue"], math_b.inputs[1])
-                    
-                    add_rg = nodes.new("ShaderNodeMath"); add_rg.operation = "ADD"
-                    links.new(math_r.outputs["Value"], add_rg.inputs[0])
-                    links.new(math_g.outputs["Value"], add_rg.inputs[1])
-                    
-                    add_rgb = nodes.new("ShaderNodeMath"); add_rgb.operation = "ADD"
-                    links.new(add_rg.outputs["Value"], add_rgb.inputs[0])
-                    links.new(math_b.outputs["Value"], add_rgb.inputs[1])
-                    
-                    threshold = nodes.new("ShaderNodeMath"); threshold.operation = "GREATER_THAN" # Inverted logic for Alpha input
-                    threshold.inputs[1].default_value = threshold_value
-                    links.new(add_rgb.outputs["Value"], threshold.inputs[0])
-                    
-                    # Connect to Alpha directly
-                    links.new(threshold.outputs["Value"], principled.inputs["Alpha"])
-                    material.blend_method = "CLIP"
-        
-        # Alpha Texture
+                tex_node.interpolation = 'Closest'
+                material.blend_method = 'CLIP'
+
+        # Alpha
         if alpha_tex:
             alpha_tex = alpha_tex.lower()
-            alpha_tex_image = nodes.new("ShaderNodeTexImage")
-            alpha_tex_image.image = self.get_or_load_texture(alpha_tex)
-            alpha_tex_image.location = (-300, -300)
-            if alpha_tex_image.image:
-                links.new(alpha_tex_image.outputs["Color"], principled.inputs["Alpha"])
-                material.blend_method = "BLEND"
-        
-        # Environment Texture
+            img = self.get_or_load_texture(alpha_tex)
+            
+            a_node = nodes.new('ShaderNodeTexImage')
+            a_node.image = img
+            a_node.location = (-400, -200)
+            a_node.label = f"Alpha: {alpha_tex}"
+            if img:
+                try: a_node.image.colorspace_settings.name = 'Non-Color'
+                except: pass
+            
+            if "Alpha Map" in group_node.inputs:
+                links.new(a_node.outputs["Color"], group_node.inputs["Alpha Map"])
+            
+            material.blend_method = 'BLEND'
+
+        # Environment
         if env_tex:
             env_tex = env_tex.lower()
-            env_image = nodes.new("ShaderNodeTexImage")
-            env_image.image = self.get_or_load_texture(env_tex)
-            if env_image.image:
-                env_image.projection = "SPHERE"
-                env_image.location = (-300, -600)
-                tex_coord = nodes.new("ShaderNodeTexCoord")
-                mapping = nodes.new("ShaderNodeMapping")
-                mapping.vector_type = 'TEXTURE'
-                tex_coord.location = (-700, -600)
-                mapping.location = (-500, -600)
-                links.new(tex_coord.outputs["Reflection"], mapping.inputs["Vector"])
-                links.new(mapping.outputs["Vector"], env_image.inputs["Vector"])
-                mix_rgb = nodes.new("ShaderNodeMixRGB")
-                mix_rgb.blend_type = 'ADD'
-                mix_rgb.inputs["Fac"].default_value = metallic
-                mix_rgb.location = (-100, -300)
-                if diffuse:
-                    links.new(tex_image.outputs["Color"], mix_rgb.inputs["Color1"])
-                else:
-                    mix_rgb.inputs["Color1"].default_value = (1.0, 1.0, 1.0, 1.0)
-                links.new(env_image.outputs["Color"], mix_rgb.inputs["Color2"])
-                links.new(mix_rgb.outputs["Color"], base_color_input)
-        
-        if principled.inputs["Alpha"].default_value < 1.0 or alpha_tex:
-            material.blend_method = "BLEND"
+            img = self.get_or_load_texture(env_tex)
+            
+            frame = nodes.new('NodeFrame'); frame.label = "Environment Map"; frame.location = (-600, -500)
+            coord = nodes.new('ShaderNodeTexCoord'); coord.location = (-1100, -500); coord.parent = frame
+            mapping = nodes.new('ShaderNodeMapping'); mapping.location = (-900, -500); mapping.parent = frame
+            
+            env_img = nodes.new('ShaderNodeTexImage')
+            env_img.image = img
+            env_img.projection = 'SPHERE'
+            env_img.location = (-700, -500)
+            env_img.parent = frame
+            
+            env_grp_data = get_or_create_env_group()
+            env_group = nodes.new('ShaderNodeGroup')
+            env_group.node_tree = env_grp_data
+            env_group.location = (-400, -500)
+            env_group.parent = frame
+            
+            if "Intensity" in env_group.inputs:
+                env_group.inputs["Intensity"].default_value = metallic 
+            
+            links.new(coord.outputs["Reflection"], mapping.inputs["Vector"])
+            links.new(mapping.outputs["Vector"], env_img.inputs["Vector"])
+            links.new(env_img.outputs["Color"], env_group.inputs["Color"])
+            
+            if "Environment Map" in group_node.inputs:
+                links.new(env_group.outputs["Output"], group_node.inputs["Environment Map"])
 
-        # Final Link
-        if not output.inputs["Surface"].is_linked:
-            links.new(principled.outputs["BSDF"], output.inputs["Surface"])
-               
-                                                           
+        # Basic blend mode fallback (if just opacity scalar is low)
+        if opacity < 1.0:
+            material.blend_method = 'BLEND'
+
     def build_armature(self):
         if not self.armature or not self.joints:
             return
@@ -1713,14 +2160,16 @@ class The4DSImporter:
             armature_data = bpy.data.armatures.new(armature_name + "_bones")
             armature_data.display_type = "OCTAHEDRAL"
             self.armature = bpy.data.objects.new(armature_name, armature_data)
+            
+            # Ensure Armature object is treated as Joint in UI
+            self.armature.ls3d_frame_type_override = 10
+            
             self.armature.show_in_front = True
             bpy.context.collection.objects.link(self.armature)
             bpy.context.view_layer.objects.active = self.armature
             bpy.ops.object.mode_set(mode="EDIT")
             base_bone = self.armature.data.edit_bones.new(armature_name)
          
-            # FIX: Base bone goes from -Y to 0.
-            # This ensures the Root Bone (at 0,0,0) connects to the Tail of this bone.
             base_bone.head = Vector((0, -0.25, 0))
             base_bone.tail = Vector((0, 0, 0))
          
@@ -1758,27 +2207,32 @@ class The4DSImporter:
             vertex_groups.append(lod_vertex_groups)
         self.skinned_meshes.append((mesh, vertex_groups, bone_to_parent))
         return vertex_groups
-         
+    
     def deserialize_dummy(self, f, empty, pos, rot, scale):
-        min_bounds = struct.unpack("<3f", f.read(12))
-        max_bounds = struct.unpack("<3f", f.read(12))
-        min_bounds = (min_bounds[0], min_bounds[2], min_bounds[1])
-        max_bounds = (max_bounds[0], max_bounds[2], max_bounds[1])
-        aabb_size = (
-            max_bounds[0] - min_bounds[0],
-            max_bounds[1] - min_bounds[1],
-            max_bounds[2] - min_bounds[2],
-        )
-        display_size = max(aabb_size[0], aabb_size[1], aabb_size[2]) * 0.5
+        # 1. Read Raw Mafia Coordinates (X, Y, Z)
+        min_raw = struct.unpack("<3f", f.read(12))
+        max_raw = struct.unpack("<3f", f.read(12))
+        
+        # 2. Convert to Blender Coordinates (Swap Y and Z)
+        # Mafia (X, Y, Z) -> Blender (X, Z, Y)
+        b_min = [min_raw[0], min_raw[2], min_raw[1]]
+        b_max = [max_raw[0], max_raw[2], max_raw[1]]
+        
+        # 3. Store in Custom Properties (The Source of Truth)
+        # We use a standard list so it's editable in UI
+        empty["bbox_min"] = b_min
+        empty["bbox_max"] = b_max
+        
+        # 4. Set Visual Size (For user convenience only)
+        # We calculate the largest dimension to set the Blender Empty size
+        width = abs(b_max[0] - b_min[0])
+        depth = abs(b_max[1] - b_min[1])
+        height = abs(b_max[2] - b_min[2])
+        
         empty.empty_display_type = "CUBE"
-        empty.empty_display_size = display_size
+        # Blender's empty size is "Radius" (half-width), so we take max dim / 2
+        empty.empty_display_size = max(width, depth, height) * 0.5
         empty.show_name = True
-        empty.location = pos
-        empty.rotation_mode = "QUATERNION"
-        empty.rotation_quaternion = (rot[0], rot[1], rot[3], rot[2])
-        empty.scale = scale
-        empty["bbox_min"] = min_bounds
-        empty["bbox_max"] = max_bounds
     def deserialize_target(self, f, empty, pos, rot, scale):
         unknown = struct.unpack("<H", f.read(2))[0]
         num_links = struct.unpack("<B", f.read(1))[0]
@@ -1856,249 +2310,337 @@ class The4DSImporter:
                                 continue
                             target_pos, _ = vertex_data[morph_idx][target_idx]
                             shape_key.data[vert_idx].co = target_pos
+    
     def apply_deferred_parenting(self):
+        # 1. Establish Hierarchy
         for frame_index, parent_id in self.parenting_info:
-            if frame_index not in self.frames_map:
-                print(f"Warning: Frame {frame_index} not found in frames_map")
+            if frame_index not in self.frames_map or parent_id not in self.frames_map:
                 continue
-            if frame_index == parent_id:
-                print(f"Ignoring frame {frame_index} - parent set to itself")
+            if frame_index == parent_id: 
                 continue
-            parent_type = self.frame_types.get(parent_id, 0)
-            child_obj = self.frames_map[frame_index]
-            if child_obj is None or isinstance(
-                child_obj, str
-            ):
-                print(
-                    f"Skipping parenting for frame {frame_index}: Not a valid object (value: {child_obj})"
-                )
-                continue
-            if parent_id not in self.frames_map:
-                print(
-                    f"Warning: Parent {parent_id} for frame {frame_index} not found in frames_map"
-                )
-                continue
-            parent_entry = self.frames_map[parent_id]
-            if parent_type == FRAME_JOINT:
-                if not self.armature:
-                    print(
-                        f"Warning: No armature available to parent frame {frame_index} to joint {parent_id}"
-                    )
-                    continue
-                parent_bone_name = self.bones_map.get(parent_id)
-                if not parent_bone_name:
-                    print(f"Warning: Bone for joint {parent_id} not found in bones_map")
-                    continue
-                if parent_bone_name not in self.armature.data.bones:
-                    print(f"Warning: Bone {parent_bone_name} not found in armature")
-                    continue
-                self.parent_to_bone(child_obj, parent_bone_name)
-            else:
-                if isinstance(parent_entry, str):
-                    print(
-                        f"Warning: Parent {parent_id} is a joint but frame type is {parent_type}"
-                    )
-                    continue
-                parent_obj = parent_entry
-                child_obj.parent = parent_obj
-    def deserialize_material(self, f):
-        mat = bpy.data.materials.new("LS3D_Material")
-        mat.use_nodes = True
-        tree = mat.node_tree
-        tree.nodes.clear()
 
-        # 1. READ RAW FLAGS
-        raw_flags = struct.unpack("<I", f.read(4))[0]
+            child_obj = self.frames_map[frame_index]
+            parent_entry = self.frames_map[parent_id]
+            parent_type = self.frame_types.get(parent_id, 0)
+
+            if child_obj is None or isinstance(child_obj, str):
+                continue
+
+            # Bone Parenting
+            if parent_type == FRAME_JOINT:
+                if self.armature:
+                    parent_bone_name = self.bones_map.get(parent_id)
+                    if parent_bone_name and parent_bone_name in self.armature.data.bones:
+                        self.parent_to_bone(child_obj, parent_bone_name)
+            
+            # Object Parenting
+            elif not isinstance(parent_entry, str):
+                # Standard Blender parenting tries to keep World Transform.
+                child_obj.parent = parent_entry
+                
+                # CRITICAL: We reset the parent inverse.
+                # This makes 'matrix_basis' (Local Transform) act exactly like the 
+                # Transform Matrix stored in the 4DS file (Child relative to Parent).
+                child_obj.matrix_parent_inverse = parent_entry.matrix_world.inverted()
+
+        # 2. Apply Transforms
+        # Now that hierarchy is linked and inverses are set, applying the raw matrix
+        # puts the origin exactly where specified in the file relative to the parent.
+        for fid, mat in self.frame_matrices.items():
+            if fid in self.frames_map:
+                obj = self.frames_map[fid]
+                if not isinstance(obj, str) and obj is not None:
+                    obj.matrix_basis = mat
+
+    def deserialize_frame(self, f, materials, frames):
+        # 1. READ HEADER
+        raw_type = f.read(1)
+        if not raw_type: return False
+        frame_type = struct.unpack("<B", raw_type)[0]
         
-        # 2. READ VALUES
+        visual_type = 0
+        visual_flags = (0, 0)
+        
+        if frame_type == 1: 
+            visual_type = struct.unpack("<B", f.read(1))[0]
+            visual_flags = struct.unpack("<2B", f.read(2))
+            
+        parent_id = struct.unpack("<H", f.read(2))[0]
+        
+        # 2. READ TRANSFORM (Mafia Space: X, Z, Y)
+        # Position
+        pos_raw = struct.unpack("<3f", f.read(12))
+        # Scale
+        scl_raw = struct.unpack("<3f", f.read(12))
+        # Rotation (Quat)
+        rot_raw = struct.unpack("<4f", f.read(16)) 
+        
+        # 3. CONVERT TO BLENDER LOCAL SPACE
+        # Pos: (x, z, y) -> (x, y, z)
+        pos = Vector((pos_raw[0], pos_raw[2], pos_raw[1]))
+        
+        # Scale: (x, z, y) -> (x, y, z)
+        scl = Vector((scl_raw[0], scl_raw[2], scl_raw[1]))
+        
+        # Rot: (w, x, z, y) -> (w, x, y, z)
+        # 4DS is W, X, Y, Z (but Y/Z swapped). Blender is W, X, Y, Z.
+        rot_quat = Quaternion((rot_raw[0], rot_raw[1], rot_raw[3], rot_raw[2]))
+        
+        # Construct the Matrix to apply later
+        local_matrix = Matrix.Translation(pos) @ rot_quat.to_matrix().to_4x4() @ Matrix.Diagonal(scl).to_4x4()
+        self.frame_matrices[self.frame_index] = local_matrix
+        
+        # 4. READ PROPERTIES
+        culling_flags = int(struct.unpack("<B", f.read(1))[0])
+        name = self.read_string(f)
+        user_props = self.read_string(f)
+        
+        self.frame_types[self.frame_index] = frame_type
+        if parent_id > 0:
+            self.parenting_info.append((self.frame_index, parent_id))
+        
+        mesh = None
+        empty = None
+        
+        # 5. CREATE OBJECTS (Using exact names)
+        if frame_type == 1: # FRAME_VISUAL
+            mesh_data = bpy.data.meshes.new(name)
+            mesh = bpy.data.objects.new(name, mesh_data)
+            bpy.context.collection.objects.link(mesh)
+            mesh.visual_type = str(visual_type)
+            frames.append(mesh)
+            self.frames_map[self.frame_index] = mesh
+            self.frame_index += 1
+            
+            inst_id, v_per_lod = self.deserialize_object(f, materials, mesh, mesh_data, culling_flags)
+            
+            if visual_type == 4: # VISUAL_BILLBOARD
+                if inst_id == 0: self.deserialize_billboard(f, mesh)
+            elif inst_id == 0:
+                if visual_type == 2: # VISUAL_SINGLEMESH
+                    self.deserialize_singlemesh(f, len(v_per_lod), mesh)
+                    self.bones_map[self.frame_index-1] = self.base_bone_name
+                if visual_type in (3, 5): 
+                    self.deserialize_morph(f, mesh, v_per_lod)
+
+        elif frame_type == 5: # FRAME_SECTOR
+            mesh = bpy.data.objects.new(name, bpy.data.meshes.new(name))
+            bpy.context.collection.objects.link(mesh)
+            frames.append(mesh); self.frames_map[self.frame_index] = mesh; self.frame_index += 1
+            self.deserialize_sector(f, mesh)
+
+        elif frame_type in (6, 7): # FRAME_DUMMY, FRAME_TARGET
+            empty = bpy.data.objects.new(name, None)
+            bpy.context.collection.objects.link(empty)
+            frames.append(empty); self.frames_map[self.frame_index] = empty; self.frame_index += 1
+            if frame_type == 6: self.deserialize_dummy(f, empty, pos, rot_quat, scl)
+            else: self.deserialize_target(f, empty, pos, rot_quat, scl)
+            
+        elif frame_type == 12: # FRAME_OCCLUDER
+            mesh = bpy.data.objects.new(name, bpy.data.meshes.new(name))
+            bpy.context.collection.objects.link(mesh)
+            frames.append(mesh); self.frames_map[self.frame_index] = mesh; self.frame_index += 1
+            self.deserialize_occluder(f, mesh, pos, rot_quat, scl)
+            
+        elif frame_type == 10: # FRAME_JOINT
+            f.read(64) 
+            bone_id = struct.unpack("<I", f.read(4))[0]
+            if self.armature:
+                self.joints.append((name, local_matrix, parent_id, bone_id))
+                self.bone_nodes[bone_id] = name
+                self.bones_map[self.frame_index] = name
+                self.frames_map[self.frame_index] = name
+                self.frame_index += 1
+        
+        target_obj = mesh if mesh else empty
+        if target_obj:
+            # Note: We do NOT set matrix_basis here yet. 
+            # We wait for hierarchy to be established in apply_deferred_parenting
+            # to ensure the origin snaps correctly relative to parent.
+            
+            target_obj.ls3d_frame_type_override = frame_type
+            target_obj.cull_flags = culling_flags
+            target_obj.ls3d_user_props = user_props
+            if frame_type == 1:
+                target_obj.render_flags = visual_flags[0]
+                target_obj.render_flags2 = visual_flags[1]
+                
+        return True
+    
+    def deserialize_material(self, f):
+        mat = bpy.data.materials.new("material")
+        
+        # 1. Read Flags (Unsigned)
+        flags = struct.unpack("<I", f.read(4))[0]
+        
+        # Convert to Signed for Blender Property
+        signed_flags = flags if flags < 0x80000000 else flags - 0x100000000
+        mat.ls3d_material_flags = signed_flags 
+
+        # 2. Logic vars
+        use_diffuse_tex = (flags & MTL_DIFFUSE_ENABLE) != 0
+        use_color_key = (flags & MTL_ALPHA_COLORKEY) != 0
+        
+        # 3. Read Colors & Opacity
         mat.ls3d_ambient_color = struct.unpack("<3f", f.read(12))
         mat.ls3d_diffuse_color = struct.unpack("<3f", f.read(12))
         mat.ls3d_emission_color = struct.unpack("<3f", f.read(12))
-        opacity = struct.unpack("<f", f.read(4))[0]
-
-        # 3. PARSE FLAGS USING CONSTANTS
-        # Tiling is inverted (Flag set = Disable Tiling)
-        mat.ls3d_misc_tile_u = not bool(raw_flags & MTL_DISABLE_U_TILING)
-        mat.ls3d_misc_tile_v = not bool(raw_flags & MTL_DISABLE_V_TILING)
         
-        # Standard
-        mat.ls3d_diff_enabled = bool(raw_flags & MTL_DIFFUSETEX)
-        mat.ls3d_env_enabled = bool(raw_flags & MTL_ENVMAP)
-        mat.ls3d_diff_mipmap = bool(raw_flags & MTL_MIPMAP)
-        mat.ls3d_alpha_imgalpha = bool(raw_flags & MTL_ALPHA_IN_TEX)
-        mat.ls3d_alpha_anim = bool(raw_flags & MTL_ANIMATED_ALPHA)
-        mat.ls3d_diff_anim = bool(raw_flags & MTL_ANIMATED_DIFFUSE)
-        mat.ls3d_diff_colored = bool(raw_flags & MTL_COLORED)
-        mat.ls3d_diff_2sided = bool(raw_flags & MTL_DOUBLESIDED)
-        mat.ls3d_alpha_colorkey = bool(raw_flags & MTL_COLORKEY)
-        mat.ls3d_alpha_enabled = bool(raw_flags & MTL_ALPHA)
-        mat.ls3d_alpha_addmix = bool(raw_flags & MTL_ADDITIVE)
-        
-        # Reflection / Advanced
-        mat.ls3d_calc_reflect_y = bool(raw_flags & MTL_CALCREFLECTTEXY)
-        mat.ls3d_proj_reflect_y = bool(raw_flags & MTL_PROJECTREFLECTTEXY)
-        mat.ls3d_proj_reflect_z = bool(raw_flags & MTL_PROJECTREFLECTTEXZ)
+        # Read Opacity to local variable
+        raw_alpha = struct.unpack("<f", f.read(4))[0]
 
+        metallic = 0.0
+        diffuse_tex = ""
+        env_tex = ""
+        
+        # 4. Textures
         # Environment
-        mat.ls3d_env_overlay = bool(raw_flags & MTL_ENV_OVERLAY)
-        mat.ls3d_env_multiply = bool(raw_flags & MTL_ENV_MULTIPLY)
-        mat.ls3d_env_additive = bool(raw_flags & MTL_ENV_ADDITIVE)
-        mat.ls3d_disable_tex = bool(raw_flags & MTL_ENV_DISABLE_TEX)
-        mat.ls3d_env_yproj = bool(raw_flags & MTL_ENV_PROJECT_Y)
-        mat.ls3d_env_ydet = bool(raw_flags & MTL_ENV_DETERMINED_Y)
-        mat.ls3d_env_zdet = bool(raw_flags & MTL_ENV_DETERMINED_Z)
-        mat.ls3d_alpha_effect = bool(raw_flags & MTL_ENV_ADDEFFECT)
+        if flags & MTL_ENV_ENABLE:
+            metallic = struct.unpack("<f", f.read(4))[0]
+            env_tex = self.read_string(f).lower()
 
-        # Misc
-        mat.ls3d_misc_unlit = bool(raw_flags & MTL_MISC_UNLIT)
-        # Z-Write is often associated with Additive in tools, but we keep it separate
-        mat.ls3d_misc_zwrite = bool(raw_flags & MTL_ADDITIVE) 
+        # Diffuse
+        has_diffuse_string = False
+        if use_diffuse_tex:
+            has_diffuse_string = True
+            diffuse_tex = self.read_string(f).lower()
+            if len(diffuse_tex) > 0:
+                mat.name = diffuse_tex
 
-        # 4. READ TEXTURE NAMES
-        env_opacity = 0.0
-        env_tex_name = ""
-        diff_tex_name = ""
-        alpha_tex_name = ""
-        
-        if mat.ls3d_env_enabled:
-            env_opacity = struct.unpack("<f", f.read(4))[0]
-            env_tex_name = self.read_string(f)
-            
-        diff_tex_name = self.read_string(f)
-        if diff_tex_name: mat.name = diff_tex_name
-        
-        if mat.ls3d_alpha_enabled:
-            alpha_tex_name = self.read_string(f)
-            
-        if mat.ls3d_diff_anim:
-            mat.ls3d_diff_frame_count = struct.unpack("<I", f.read(4))[0]
-            f.read(2) 
-            mat.ls3d_diff_frame_period = struct.unpack("<I", f.read(4))[0]
+        # Alpha
+        has_alpha_string = False
+        alpha_tex = ""
+        if (flags & MTL_ALPHA_ENABLE) and (flags & MTL_ALPHATEX):
+            has_alpha_string = True
+            alpha_tex = self.read_string(f).lower()
+
+        # 5. Padding Byte (CRITICAL FIX)
+        # In v29, Env Map does NOT count towards the texture check for padding.
+        # We only skip the byte if Diffuse AND Alpha strings are missing.
+        if not has_diffuse_string and not has_alpha_string:
+             f.read(1)
+
+        # 6. Anim Data (Exclusive Logic: Elif)
+        # Also requires Signed Conversion
+        if flags & MTL_ALPHA_ANIMATED:
+            raw_frames = struct.unpack("<I", f.read(4))[0]
+            f.read(2)
+            raw_period = struct.unpack("<I", f.read(4))[0]
             f.read(8)
+            mat.ls3d_alpha_anim_frames = raw_frames if raw_frames < 0x80000000 else raw_frames - 0x100000000
+            mat.ls3d_alpha_anim_period = raw_period if raw_period < 0x80000000 else raw_period - 0x100000000
 
-        # 5. RECONSTRUCT NODE GRAPH
-        ls3d_group = get_or_create_ls3d_group()
-        group_node = tree.nodes.new('ShaderNodeGroup')
-        group_node.node_tree = ls3d_group
-        group_node.location = (0, 0)
-        group_node.width = 300
-        
-        if "Opacity" in group_node.inputs:
-            group_node.inputs["Opacity"].default_value = opacity * 100.0
+        elif flags & MTL_DIFFUSE_ANIMATED:
+            raw_frames = struct.unpack("<I", f.read(4))[0]
+            f.read(2)
+            raw_period = struct.unpack("<I", f.read(4))[0]
+            f.read(8)
+            mat.ls3d_diffuse_anim_frames = raw_frames if raw_frames < 0x80000000 else raw_frames - 0x100000000
+            mat.ls3d_diffuse_anim_period = raw_period if raw_period < 0x80000000 else raw_period - 0x100000000
 
-        output = tree.nodes.new('ShaderNodeOutputMaterial')
-        output.location = (350, 0)
-        tree.links.new(group_node.outputs["BSDF"], output.inputs["Surface"])
+        # 7. Setup Nodes
+        self.set_material_data(
+            mat, diffuse_tex, alpha_tex, env_tex, mat.ls3d_emission_color, 
+            raw_alpha, metallic, use_color_key
+        )
 
-        if diff_tex_name:
-            tex = tree.nodes.new('ShaderNodeTexImage')
-            tex.image = self.get_or_load_texture(diff_tex_name)
-            tex.location = (-400, 200)
-            tex.label = "Diffuse Map"
-            if mat.ls3d_alpha_colorkey: tex.interpolation = 'Closest'
-            
-            if "Diffuse Map" in group_node.inputs:
-                tree.links.new(tex.outputs["Color"], group_node.inputs["Diffuse Map"])
-            if mat.ls3d_alpha_imgalpha and "Alpha Map" in group_node.inputs:
-                tree.links.new(tex.outputs["Alpha"], group_node.inputs["Alpha Map"])
-
-        if alpha_tex_name:
-            tex = tree.nodes.new('ShaderNodeTexImage')
-            tex.image = self.get_or_load_texture(alpha_tex_name)
-            tex.location = (-400, -100)
-            tex.label = "Alpha Map"
-            if "Alpha Map" in group_node.inputs:
-                tree.links.new(tex.outputs["Color"], group_node.inputs["Alpha Map"])
-            mat.blend_method = 'BLEND'
-
-        if env_tex_name and mat.ls3d_env_enabled:
-            frame = tree.nodes.new('NodeFrame'); frame.label = "Reflection"; frame.location = (-600, -400)
-            coord = tree.nodes.new('ShaderNodeTexCoord'); coord.location = (-1100, -400); coord.parent = frame
-            mapping = tree.nodes.new('ShaderNodeMapping'); mapping.location = (-900, -400); mapping.parent = frame
-            env_img = tree.nodes.new('ShaderNodeTexImage'); env_img.location = (-700, -400); env_img.projection = 'SPHERE'; env_img.parent = frame
-            env_img.image = self.get_or_load_texture(env_tex_name); env_img.label = "Reflection Map"
-            
-            env_grp_data = get_or_create_env_group()
-            env_group = tree.nodes.new('ShaderNodeGroup'); env_group.node_tree = env_grp_data; env_group.location = (-400, -400); env_group.parent = frame
-            
-            if "Intensity" in env_group.inputs: env_group.inputs["Intensity"].default_value = env_opacity
-            
-            tree.links.new(coord.outputs["Reflection"], mapping.inputs["Vector"])
-            tree.links.new(mapping.outputs["Vector"], env_img.inputs["Vector"])
-            tree.links.new(env_img.outputs["Color"], env_group.inputs["Color"])
-            
-            if "Reflection" in group_node.inputs:
-                tree.links.new(env_group.outputs["Output"], group_node.inputs["Reflection"])
-
-        # 6. BLENDER SETTINGS (Blender 5.0 compatible)
-        mat.use_backface_culling = not mat.ls3d_diff_2sided
-        if mat.ls3d_alpha_colorkey:
-            mat.blend_method = 'CLIP'
-            # Fallback for 5.0: If opacity is < 100%, we need BLEND to see it fade
-            if group_node.inputs["Opacity"].default_value < 100.0: mat.blend_method = 'BLEND'
-        elif mat.ls3d_alpha_addmix or mat.ls3d_alpha_enabled or mat.ls3d_alpha_imgalpha:
-            mat.blend_method = 'BLEND'
-        else:
-            mat.blend_method = 'OPAQUE'
-        
         return mat
     
+    # def deserialize_material(self, f):
+    #     mat = bpy.data.materials.new("material")
+    #     flags = struct.unpack("<I", f.read(4))[0]
+
+    #     use_diffuse_tex = (flags & MTL_DIFFUSE_ENABLE) != 0
+    #     use_color_key = (flags & MTL_ALPHA_COLORKEY) != 0
+    #     ambient = struct.unpack("<3f", f.read(12))
+    #     diffuse = struct.unpack("<3f", f.read(12))
+    #     emission = struct.unpack("<3f", f.read(12))
+    #     alpha = struct.unpack("<f", f.read(4))[0]
+
+    #     metallic = 0.0
+    #     diffuse_tex = ""
+    #     env_tex = ""
+    #     has_tex = False
+    #     if flags & MTL_ENV_ENABLE:  # Env texture
+    #         metallic = struct.unpack("<f", f.read(4))[0]
+    #         env_tex = self.read_string(f).lower()
+
+    #     if use_diffuse_tex:
+    #         has_tex = True
+    #         diffuse_tex = self.read_string(f).lower()
+    #         if len(diffuse_tex) > 0:
+    #             mat.name = diffuse_tex
+
+    #     alpha_tex = ""
+    #     if (flags & MTL_ALPHA_ENABLE) and (flags & MTL_ALPHATEX):
+    #         has_tex = True
+    #         alpha_tex = self.read_string(f).lower()
+
+    #     if not has_tex:
+    #         f.read(1)
+
+    #     if flags & MTL_ALPHA_ANIMATED:  # Animated alpha
+    #         struct.unpack("<I", f.read(4))  # Frames
+    #         f.read(2)  # Skip
+    #         struct.unpack("<I", f.read(4))  # Frame length
+    #         f.read(8)  # Skip
+
+    #     if flags & MTL_DIFFUSE_ANIMATED:  # Animated diffuse
+    #         struct.unpack("<I", f.read(4))  # Frames
+    #         f.read(2)  # Skip
+    #         struct.unpack("<I", f.read(4))  # Frame length
+    #         f.read(8)  # Skip
+
+    #     self.set_material_data(
+    #         mat, diffuse_tex, alpha_tex, env_tex, emission, alpha, metallic, use_color_key
+    #     )
+    #     return mat
+
     def deserialize_object(self, f, materials, mesh, mesh_data, culling_flags):
-        instance_id = struct.unpack("<H", f.read(2))[0]
-        if instance_id > 0:
-            return None, None
-            
-        vertices_per_lod = []
-        num_lods = struct.unpack("<B", f.read(1))[0]
+        raw_id = f.read(2)
+        if not raw_id: return -1, []
+        instance_id = struct.unpack("<H", raw_id)[0]
         
+        if instance_id > 0:
+            return instance_id, []
+            
+        num_lods = struct.unpack("<B", f.read(1))[0]
+        vertices_per_lod = []
         base_name = mesh.name
         
         for lod_idx in range(num_lods):
-            # 1. READ DISTANCE
             clipping_range = struct.unpack("<f", f.read(4))[0]
             
-            # 2. CREATE OBJECT & ASSIGN DISTANCE
             if lod_idx > 0:
                 name = f"{base_name}_lod{lod_idx}"
-                mesh_data = bpy.data.meshes.new(name)
-                new_mesh = bpy.data.objects.new(name, mesh_data)
-                new_mesh.parent = mesh 
+                m_data = bpy.data.meshes.new(name)
+                new_mesh = bpy.data.objects.new(name, m_data)
+                new_mesh.parent = mesh
                 new_mesh.matrix_local = Matrix.Identity(4) 
+                new_mesh.hide_viewport = True 
                 bpy.context.collection.objects.link(new_mesh)
-                
-                # Assign to child LOD
                 new_mesh.ls3d_lod_dist = clipping_range
-                new_mesh.cull_flags = culling_flags
-                new_mesh.hide_set(True)
-                new_mesh.hide_render = True
-                
-                current_mesh = mesh_data
+                current_mesh = m_data
             else:
-                # Assign to Root LOD
                 mesh.ls3d_lod_dist = clipping_range
                 current_mesh = mesh_data
 
             num_vertices = struct.unpack("<H", f.read(2))[0]
             vertices_per_lod.append(num_vertices)
             
-            # --- GEOMETRY ---
-            raw_pos = []
-            raw_norm = []
-            raw_uv = []
-            
+            raw_pos, raw_norm, raw_uv = [], [], []
             for _ in range(num_vertices):
-                data = struct.unpack("<3f3f2f", f.read(32))
-                raw_pos.append((data[0], data[2], data[1]))
-                raw_norm.append((data[3], data[5], data[4]))
-                raw_uv.append((data[6], 1.0 - data[7]))
+                d = struct.unpack("<3f3f2f", f.read(32))
+                raw_pos.append((d[0], d[2], d[1]))
+                raw_norm.append((d[3], d[5], d[4]))
+                raw_uv.append((d[6], 1.0 - d[7]))
 
             bm = bmesh.new()
             bm_verts = [bm.verts.new(p) for p in raw_pos]
             bm.verts.ensure_lookup_table()
             
             num_face_groups = struct.unpack("<B", f.read(1))[0]
-            
-            for group_idx in range(num_face_groups):
+            for _ in range(num_face_groups):
                 num_faces = struct.unpack("<H", f.read(2))[0]
                 raw_faces = struct.unpack(f"<{num_faces*3}H", f.read(num_faces * 6))
                 mat_idx = struct.unpack("<H", f.read(2))[0]
@@ -2114,284 +2656,198 @@ class The4DSImporter:
                 
                 for i in range(0, len(raw_faces), 3):
                     try:
-                        v1, v2, v3 = bm_verts[raw_faces[i]], bm_verts[raw_faces[i+2]], bm_verts[raw_faces[i+1]]
-                        face = bm.faces.new((v1, v2, v3))
+                        face = bm.faces.new((bm_verts[raw_faces[i]], bm_verts[raw_faces[i+2]], bm_verts[raw_faces[i+1]]))
                         face.material_index = slot_index
-                        face.smooth = True 
-                    except ValueError: pass
+                        face.smooth = True
+                    except ValueError:
+                        pass 
 
             bm.to_mesh(current_mesh)
             bm.free()
             
-            # --- NORMALS & UVS ---
+            # UVs and Normals
             if num_vertices > 0:
                 uv_layer = current_mesh.uv_layers.new(name="UVMap")
                 loop_normals = []
                 for loop in current_mesh.loops:
-                    v_idx = loop.vertex_index
-                    uv_layer.data[loop.index].uv = raw_uv[v_idx]
-                    loop_normals.append(raw_norm[v_idx])
-                
+                    uv_layer.data[loop.index].uv = raw_uv[loop.vertex_index]
+                    loop_normals.append(raw_norm[loop.vertex_index])
                 try: current_mesh.normals_split_custom_set(loop_normals)
                 except: pass
-
-                if hasattr(current_mesh, "use_auto_smooth"):
-                    current_mesh.use_auto_smooth = True
-                current_mesh.validate(clean_customdata=False)
-            
-        return num_lods, vertices_per_lod
+        
+        return 0, vertices_per_lod
     
     def deserialize_sector(self, f, mesh):
-        # 1. Flags
-        flags = struct.unpack("<2I", f.read(8))
-        mesh.ls3d_sector_flags1 = flags[0]
-        mesh.ls3d_sector_flags2 = flags[1]
+        # 1. Set Frame Type to SECTOR (5) explicitly
+        # This ensures the UI recognizes it as a Sector and allows its children to be Portals
+        mesh.ls3d_frame_type_override = 5 
         
-        # 2. Geometry
+        f1 = struct.unpack("<i", f.read(4))[0]
+        f2 = struct.unpack("<i", f.read(4))[0]
+        
+        mesh.ls3d_sector_flags1 = f1
+        mesh.ls3d_sector_flags2 = f2
+        
+        bm = bmesh.new()
         num_verts = struct.unpack("<I", f.read(4))[0]
         num_faces = struct.unpack("<I", f.read(4))[0]
         
-        bm = bmesh.new()
         vertices = []
         for _ in range(num_verts):
             p = struct.unpack("<3f", f.read(12))
-            # Swap Y/Z for Blender
-            vert = bm.verts.new((p[0], p[2], p[1]))
-            vertices.append(vert)
+            # Swap Y/Z
+            vertices.append(bm.verts.new((p[0], p[2], p[1])))
         bm.verts.ensure_lookup_table()
         
         for _ in range(num_faces):
             idxs = struct.unpack("<3H", f.read(6))
-            try: bm.faces.new([vertices[idxs[0]], vertices[idxs[2]], vertices[idxs[1]]])
+            try: 
+                # Swap Winding
+                bm.faces.new([vertices[idxs[0]], vertices[idxs[2]], vertices[idxs[1]]])
             except: pass
             
         bm.to_mesh(mesh.data)
         bm.free()
         
-        # 3. Bounds (Mafia: Read AFTER mesh)
-        min_b = struct.unpack("<3f", f.read(12))
-        max_b = struct.unpack("<3f", f.read(12))
+        min_b = struct.unpack("<3f", f.read(12)); max_b = struct.unpack("<3f", f.read(12))
         mesh.bbox_min = (min_b[0], min_b[2], min_b[1])
         mesh.bbox_max = (max_b[0], max_b[2], max_b[1])
         
-        # 4. Portals
         num_portals = struct.unpack("<B", f.read(1))[0]
         for i in range(num_portals):
             self.deserialize_portal(f, mesh, i)
 
+        # --- WIREFRAME SETTINGS ---
+        mesh.display_type = 'WIRE'
+        mesh.show_all_edges = True
+
     def deserialize_portal(self, f, parent_sector, index):
-        # Byte 1: Num Verts
         num_verts = struct.unpack("<B", f.read(1))[0]
         
-        # Mafia Order: Flags(I), Near(f), Far(f)
         flags = struct.unpack("<I", f.read(4))[0]
         near_r = struct.unpack("<f", f.read(4))[0]
         far_r = struct.unpack("<f", f.read(4))[0]
         
-        # Plane: Normal(3f), Dot(f)
         normal = struct.unpack("<3f", f.read(12))
         dotp = struct.unpack("<f", f.read(4))[0]
         
-        # Vertices
         verts = []
         for _ in range(num_verts):
             p = struct.unpack("<3f", f.read(12))
             verts.append((p[0], p[2], p[1]))
             
-        # Create Object
-        p_name = f"{parent_sector.name}_Portal_{index}"
+        # Create Object (1-based index)
+        p_name = f"{parent_sector.name}_portal{index + 1}"
         p_mesh = bpy.data.meshes.new(p_name)
         p_obj = bpy.data.objects.new(p_name, p_mesh)
         p_obj.parent = parent_sector
         bpy.context.collection.objects.link(p_obj)
         
+        # --- CRITICAL FIX: Set Frame Type to SECTOR (5) ---
+        # The UI logic requires: Type=5 AND ParentType=5 AND Name="...portal..."
+        p_obj.ls3d_frame_type_override = 5
+        
+        # --- WIREFRAME SETTINGS ---
+        p_obj.display_type = 'WIRE'
+        
+        # Apply flags to property
         p_obj.ls3d_portal_flags = flags
         p_obj.ls3d_portal_near = near_r
         p_obj.ls3d_portal_far = far_r
         
-        # Build Mesh
         bm = bmesh.new()
         for v in verts: bm.verts.new(v)
         bm.verts.ensure_lookup_table()
-        if len(bm.verts) >= 3: bm.faces.new(bm.verts)
+        if len(bm.verts) >= 3: 
+            try: bm.faces.new(bm.verts)
+            except: pass
         bm.to_mesh(p_mesh)
         bm.free()
 
-    def deserialize_frame(self, f, materials, frames):
-        frame_type = struct.unpack("<B", f.read(1))[0]
-        visual_type = 0
-        visual_flags = (128, 42) 
-        
-        if frame_type == FRAME_VISUAL:
-            visual_type = struct.unpack("<B", f.read(1))[0]
-            visual_flags = struct.unpack("<2B", f.read(2))
+    def deserialize_occluder(self, f, mesh, pos, rot, scl):
+        # 1. Read Counts (uint32 from Max4ds)
+        # We read these first to know how much data to expect
+        data_counts = f.read(8) # 2 * 4 bytes
+        if len(data_counts) < 8:
+            print(f"LS3D Error: Occluder '{mesh.name}' truncated at header.")
+            return
             
-        parent_id = struct.unpack("<H", f.read(2))[0]
-        position = struct.unpack("<3f", f.read(12))
-        scale = struct.unpack("<3f", f.read(12))
-        rot = struct.unpack("<4f", f.read(16)) 
+        num_verts, num_faces = struct.unpack("<2I", data_counts)
         
-        pos = (position[0], position[2], position[1])
-        scl = (scale[0], scale[2], scale[1])
-        rot_tuple = (rot[0], rot[1], rot[3], rot[2])
+        # 2. Setup BMesh
+        bm = bmesh.new()
         
-        scale_mat = Matrix.Diagonal(scl).to_4x4()
-        rot_mat = Quaternion(rot_tuple).to_matrix().to_4x4()
-        trans_mat = Matrix.Translation(pos)
-        transform_mat = trans_mat @ rot_mat @ scale_mat
-        
-        # Read Flag and convert to int just to be safe
-        culling_flags = int(struct.unpack("<B", f.read(1))[0])
-        name = self.read_string(f)
-        user_props = self.read_string(f)
-        
-        self.frame_types[self.frame_index] = frame_type
-        if parent_id > 0:
-            self.parenting_info.append((self.frame_index, parent_id))
-        
-        mesh = None
-        empty = None
-        
-        if frame_type == FRAME_VISUAL:
-            if visual_type in (VISUAL_OBJECT, VISUAL_LITOBJECT):
-                mesh_data = bpy.data.meshes.new(name + "_mesh")
-                mesh = bpy.data.objects.new(name, mesh_data)
-                bpy.context.collection.objects.link(mesh)
-                mesh.visual_type = str(visual_type)
-                frames.append(mesh)
-                self.frames_map[self.frame_index] = mesh
-                self.frame_index += 1
-                mesh.matrix_local = transform_mat
+        # 3. Read Vertices
+        # Max4ds: for vertId = 1 to tr.numVerts do setVert...
+        # Each vertex is 3 floats (12 bytes)
+        verts = []
+        try:
+            for _ in range(num_verts):
+                # Read 12 bytes
+                data = f.read(12)
+                if len(data) < 12:
+                    raise struct.error("Unexpected EOF reading vertices")
+                    
+                v = struct.unpack("<3f", data)
                 
-                mesh.cull_flags = culling_flags
-                self.deserialize_object(f, materials, mesh, mesh_data, culling_flags)
-            
-            elif visual_type == VISUAL_BILLBOARD:
-                mesh_data = bpy.data.meshes.new(name + "_mesh")
-                mesh = bpy.data.objects.new(name, mesh_data)
-                bpy.context.collection.objects.link(mesh)
-                mesh.visual_type = '4'
-                frames.append(mesh)
-                self.frames_map[self.frame_index] = mesh
-                self.frame_index += 1
-                mesh.matrix_local = transform_mat
+                # Convert Mafia (X, Z, Y) -> Blender (X, Y, Z)
+                # Occluders are local space, so we just swap axes
+                verts.append(bm.verts.new((v[0], v[2], v[1])))
                 
-                mesh.cull_flags = culling_flags
-                self.deserialize_object(f, materials, mesh, mesh_data, culling_flags)
-                self.deserialize_billboard(f, mesh)
+        except struct.error:
+            print(f"LS3D Error: Occluder '{mesh.name}' corrupted vertex data.")
+            bm.free()
+            return
 
-            elif visual_type == VISUAL_MIRROR:
-                mesh_data = bpy.data.meshes.new(name + "_mesh")
-                mesh = bpy.data.objects.new(name, mesh_data)
-                bpy.context.collection.objects.link(mesh)
-                mesh.visual_type = '8'
-                frames.append(mesh)
-                self.frames_map[self.frame_index] = mesh
-                self.frame_index += 1
-                mesh.matrix_local = transform_mat
-                self.deserialize_mirror(f, mesh)
-
-            elif visual_type in (VISUAL_SINGLEMESH, VISUAL_SINGLEMORPH, VISUAL_MORPH):
-                mesh_data = bpy.data.meshes.new(name + "_mesh")
-                mesh = bpy.data.objects.new(name, mesh_data)
-                bpy.context.collection.objects.link(mesh)
-                mesh.visual_type = str(visual_type)
-                frames.append(mesh)
-                self.frames_map[self.frame_index] = mesh
-                mesh.matrix_local = transform_mat
-                
-                mesh.cull_flags = culling_flags
-                num_lods, verts_per_lod = self.deserialize_object(f, materials, mesh, mesh_data, culling_flags)
-                
-                if visual_type != VISUAL_MORPH:
-                    self.deserialize_singlemesh(f, num_lods, mesh)
-                    self.bones_map[self.frame_index] = self.base_bone_name
-                
-                if visual_type != VISUAL_SINGLEMESH:
-                    self.deserialize_morph(f, mesh, verts_per_lod)
-                
-                self.frame_index += 1
-            
-            else:
-                mesh_data = bpy.data.meshes.new(name + "_mesh")
-                mesh = bpy.data.objects.new(name, mesh_data)
-                bpy.context.collection.objects.link(mesh)
-                mesh.visual_type = str(visual_type)
-                frames.append(mesh)
-                self.frames_map[self.frame_index] = mesh
-                self.frame_index += 1
-                mesh.matrix_local = transform_mat
-                try: 
-                    mesh.cull_flags = culling_flags
-                    self.deserialize_object(f, materials, mesh, mesh_data, culling_flags)
-                except: 
-                    print(f"Warning: Could not parse geometry for visual type {visual_type}")
-
-        elif frame_type == FRAME_SECTOR:
-            mesh_data = bpy.data.meshes.new(name)
-            mesh = bpy.data.objects.new(name, mesh_data)
-            bpy.context.collection.objects.link(mesh)
-            frames.append(mesh)
-            self.frames_map[self.frame_index] = mesh
-            self.frame_index += 1
-            mesh.matrix_local = transform_mat
-            self.deserialize_sector(f, mesh)
-
-        elif frame_type == FRAME_DUMMY:
-            empty = bpy.data.objects.new(name, None)
-            bpy.context.collection.objects.link(empty)
-            frames.append(empty)
-            self.frames_map[self.frame_index] = empty
-            self.frame_index += 1
-            self.deserialize_dummy(f, empty, pos, rot_tuple, scl)
-            
-        elif frame_type == FRAME_TARGET:
-            empty = bpy.data.objects.new(name, None)
-            bpy.context.collection.objects.link(empty)
-            frames.append(empty)
-            self.frames_map[self.frame_index] = empty
-            self.frame_index += 1
-            self.deserialize_target(f, empty, pos, rot_tuple, scl)
-            
-        elif frame_type == FRAME_OCCLUDER:
-            mesh_data = bpy.data.meshes.new(name)
-            mesh = bpy.data.objects.new(name, mesh_data)
-            bpy.context.collection.objects.link(mesh)
-            frames.append(mesh)
-            self.frames_map[self.frame_index] = mesh
-            self.frame_index += 1
-            self.deserialize_occluder(f, mesh, pos, rot_tuple, scl)
-            
-        elif frame_type == FRAME_JOINT:
-            _ = f.read(64) 
-            bone_id = struct.unpack("<I", f.read(4))[0]
-            if self.armature:
-                self.joints.append((name, transform_mat, parent_id, bone_id))
-                self.bone_nodes[bone_id] = name
-                self.bones_map[self.frame_index] = name
-                self.frames_map[self.frame_index] = name
-                self.frame_index += 1
+        bm.verts.ensure_lookup_table()
         
-        target_obj = mesh if mesh else empty
-        if target_obj:
-            target_obj.cull_flags = culling_flags
-            target_obj.ls3d_user_props = user_props
-            target_obj["Frame Properties"] = user_props 
-            
-            if frame_type == FRAME_VISUAL:
-                target_obj.render_flags = visual_flags[0]
-                target_obj.render_flags2 = visual_flags[1]
+        # 4. Read Faces
+        # Max4ds: for faceId = 1 to tr.numFaces...
+        # Each face is 3 unsigned shorts (6 bytes)
+        try:
+            for _ in range(num_faces):
+                data = f.read(6)
+                if len(data) < 6:
+                    raise struct.error("Unexpected EOF reading faces")
+                    
+                idx = struct.unpack("<3H", data)
                 
-        return True
-    
+                # Check indices valid range
+                if idx[0] < num_verts and idx[1] < num_verts and idx[2] < num_verts:
+                    try:
+                        # Swap Winding: (0, 1, 2) -> (0, 2, 1) for Blender
+                        bm.faces.new((verts[idx[0]], verts[idx[2]], verts[idx[1]]))
+                    except ValueError:
+                        pass # Ignore duplicate faces
+                        
+        except struct.error:
+            print(f"LS3D Error: Occluder '{mesh.name}' corrupted face data.")
+
+        # 5. Finalize
+        bm.to_mesh(mesh.data)
+        bm.free()
+        
+        # Occluders are usually wireframe in editors
+        mesh.display_type = 'WIRE'
+        mesh.show_all_edges = True
+
     def deserialize_billboard(self, f, obj):
-        # rotAxis (U32, 1-based), rotMode (U8, 1-based)
-        rot_axis = struct.unpack("<I", f.read(4))[0]
-        rot_mode = struct.unpack("<B", f.read(1))[0]
+        axis = struct.unpack("<I", f.read(4))[0]
+        axis_mode = struct.unpack("<?", f.read(1))[0]
         
-        # Map to 0-based Enum
-        obj.rot_axis = str(max(0, rot_axis - 1))
-        obj.rot_mode = str(max(0, rot_mode - 1))
+        if not axis_mode:
+            obj.rot_mode = '1'
+            obj.rot_axis = '2'  # Default to Z for all axes
+        else:
+            obj.rot_mode = '2'
+            if axis == 0:
+                obj.rot_axis = '1'  # X
+            elif axis == 1:
+                obj.rot_axis = '2'  # Mafia Y (up) -> Blender Z (up)
+            elif axis == 2:
+                obj.rot_axis = '3'  # Mafia Z -> Blender Y
+            else:
+                obj.rot_axis = '2'  # Default to Z
 
     def deserialize_mirror(self, f, obj):
         # 1. Props
@@ -2435,22 +2891,156 @@ class Export4DS(bpy.types.Operator, ExportHelper):
     bl_label = "Export 4DS"
     filename_ext = ".4ds"
     filter_glob = StringProperty(default="*.4ds", options={"HIDDEN"})
+    
+    def validate_geometry(self, objects):
+        """
+        Validates geometry constraints:
+        1. Sectors (Type 5, no portal name): Must be a Convex Volume (4+ faces).
+        2. Portals (Type 5, portal name): Must be Planar, Convex, <= 32 verts.
+        3. Occluders (Type 12): Must be Convex.
+        """
+        CONVEX_TOLERANCE = 0.01 
+
+        for obj in objects:
+            if obj.type != 'MESH':
+                continue
+
+            frame_type_str = getattr(obj, "ls3d_frame_type", '1')
+            
+            # Detect Portal by name pattern (Standard LS3D convention)
+            # User Rule: Child of Sector + Type Sector + Suffix _portal<number>
+            is_portal_name = bool(re.search(r"_portal\d+$", obj.name, re.IGNORECASE))
+            
+            # --- SECTOR (5) & OCCLUDER (12) CHECKS ---
+            # We treat it as a Sector/Volume ONLY if it is NOT named like a portal.
+            if frame_type_str in ('5', '12') and not is_portal_name:
+                bm = bmesh.new()
+                bm.from_mesh(obj.data)
+                
+                # Basic cleanup
+                bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=0.001)
+                bmesh.ops.triangulate(bm, faces=bm.faces)
+                bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+
+                # Sector Volume Check: Must have at least 4 faces to be a volume
+                # We skip this check for Occluders (12) as they can sometimes be single planes (walls)
+                if len(bm.faces) < 4 and frame_type_str == '5':
+                    self.report({'ERROR'}, f"Export Stopped: Sector '{obj.name}' is not a volume (too few faces).\nIf this is a portal, ensure it is named ending in '_portal<number>'.")
+                    bm.free()
+                    return False
+
+                # CONVEXITY CHECK (Plane Test)
+                is_convex = True
+                failure_reason = ""
+                
+                bm.verts.ensure_lookup_table()
+                bm.faces.ensure_lookup_table()
+
+                for face in bm.faces:
+                    plane_co = face.calc_center_median()
+                    plane_no = face.normal
+                    
+                    for v in bm.verts:
+                        # Vector from plane to vertex
+                        diff = v.co - plane_co
+                        dist = diff.dot(plane_no)
+                        
+                        # Positive distance means vertex is "in front" of the face -> Concave
+                        if dist > CONVEX_TOLERANCE:
+                            is_convex = False
+                            failure_reason = f"Concave geometry detected."
+                            break
+                    if not is_convex: break
+                
+                bm.free()
+
+                if not is_convex:
+                    self.report({'ERROR'}, f"Export Stopped: '{obj.name}' is NOT Convex.\nReason: {failure_reason}\nLS3D Engine requires Sectors and Occluders to be perfectly convex.")
+                    return False
+
+            # --- PORTAL CHECKS ---
+            # Identify if it acts as a portal
+            is_valid_portal = False
+            if is_portal_name:
+                if frame_type_str == '5': is_valid_portal = True
+                if obj.parent and getattr(obj.parent, "ls3d_frame_type", '1') == '5': is_valid_portal = True
+            
+            if is_valid_portal:
+                # 1. Planarity Check (Before dissolving)
+                bm_p = bmesh.new()
+                bm_p.from_mesh(obj.data)
+                if len(bm_p.faces) > 0:
+                    bm_p.faces.ensure_lookup_table()
+                    ref_n = bm_p.faces[0].normal
+                    ref_c = bm_p.faces[0].calc_center_median()
+                    for v in bm_p.verts:
+                        if abs((v.co - ref_c).dot(ref_n)) > 0.05:
+                            self.report({'ERROR'}, f"Export Stopped: Portal '{obj.name}' is not flat."); bm_p.free(); return False
+                
+                # 2. N-Gon Vertex Count Check
+                # Dissolve internal edges to find true perimeter count
+                # bmesh.ops.remove_doubles(bm_p, verts=bm_p.verts, dist=0.001)
+                bmesh.ops.dissolve_faces(bm_p, faces=bm_p.faces)
+                
+                # Count verts on the resulting face(s)
+                bm_p.verts.ensure_lookup_table()
+                unique_count = len(bm_p.verts)
+                
+                if unique_count > 8:
+                    self.report({'ERROR'}, f"Export Stopped: Portal '{obj.name}' has {unique_count} vertices (Limit 8)."); bm_p.free(); return False
+                if unique_count < 3:
+                    self.report({'ERROR'}, f"Export Stopped: Portal '{obj.name}' has too few vertices."); bm_p.free(); return False
+                
+                bm_p.free()
+
+
+        return True
+    
     def execute(self, context):
         # Use selected objects if any, otherwise all objects in scene
         objects = context.selected_objects if context.selected_objects else context.scene.objects
+        
+        # Apply all transforms
+        bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+
+        # 1. Validation
+        if not self.validate_geometry(objects): 
+            return {'CANCELLED'}
+            
+        # 2. Export
         exporter = The4DSExporter(self.filepath, objects)
         exporter.serialize_file()
         return {"FINISHED"}
+    
 class Import4DS(bpy.types.Operator, ImportHelper):
     bl_idname = "import_scene.4ds"
     bl_label = "Import 4DS"
     bl_options = {"REGISTER", "UNDO"}
     filename_ext = ".4ds"
     filter_glob = StringProperty(default="*.4ds", options={"HIDDEN"})
+
     def execute(self, context):
+        # 1. Define the Popup Draw Function
+        def draw_loading_popup(self, context):
+            layout = self.layout
+            layout.label(text="LS3D Import Started...", icon='INFO')
+            layout.separator()
+            layout.label(text="Please wait while the model loads.")
+            layout.label(text="Check System Console for detailed progress.")
+            layout.label(text="(Window > Toggle System Console)")
+
+        # 2. Spawn the Popup at Cursor
+        context.window_manager.popup_menu(draw_loading_popup, title="Importing...", icon='TIME')
+
+        # 3. Force UI Update (Hack to make the popup appear before the script freezes the UI)
+        bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
+
+        # 4. Run the Actual Import
         importer = The4DSImporter(self.filepath)
         importer.import_file()
+        
         return {"FINISHED"}
+    
 def menu_func_import(self, context):
     self.layout.operator(Import4DS.bl_idname, text="4DS Model File (.4ds)")
 
@@ -2460,18 +3050,38 @@ def menu_func_export(self, context):
 # --- PROPERTY HELPER FUNCTIONS ---
 # These must exist before register() is called
 
+# --- PROPERTY HELPER FUNCTIONS ---
+
 def get_flag_bit(self, prop_name, bit_index):
-    """Returns True if the specific bit is set in the integer property."""
+    """Returns True if the specific bit is set (Handles negative integers correctly)."""
     value = getattr(self, prop_name, 0)
     return (value & (1 << bit_index)) != 0
 
 def set_flag_bit(self, value, prop_name, bit_index):
-    """Sets or clears a specific bit in the integer property."""
-    current = getattr(self, prop_name, 0)
+    """
+    Sets a bit safely for Blender's Signed 32-bit IntProperty.
+    Prevents clamping when setting the 32nd bit (Additive).
+    """
+    # 1. Get current value as Unsigned 32-bit (Masking handles the negative sign)
+    current_signed = getattr(self, prop_name, 0)
+    current_unsigned = current_signed & 0xFFFFFFFF
+    
+    mask = 1 << bit_index
+
+    # 2. Perform Bitwise Operation in Unsigned Space
     if value:
-        setattr(self, prop_name, current | (1 << bit_index))
+        new_unsigned = current_unsigned | mask
     else:
-        setattr(self, prop_name, current & ~(1 << bit_index))
+        new_unsigned = current_unsigned & ~mask
+
+    # 3. Convert back to Signed 32-bit for Blender storage
+    # If value is >= 2147483648 (0x80000000), it must become negative.
+    if new_unsigned >= 0x80000000:
+        new_signed = new_unsigned - 0x100000000
+    else:
+        new_signed = new_unsigned
+
+    setattr(self, prop_name, int(new_signed))
 
 def make_getter(prop_name, bit_index):
     return lambda self: get_flag_bit(self, prop_name, bit_index)
@@ -2479,225 +3089,260 @@ def make_getter(prop_name, bit_index):
 def make_setter(prop_name, bit_index):
     return lambda self, value: set_flag_bit(self, value, prop_name, bit_index)
 
+# --- STRING PROPERTY HELPERS (For Raw Int Display) ---
+
+def get_mat_flags_unsigned(self):
+    """Converts the internal signed integer to a string representing the unsigned value."""
+    val = self.ls3d_material_flags & 0xFFFFFFFF
+    return str(val)
+
+def set_mat_flags_unsigned(self, value):
+    """Converts user input string back to signed integer for storage."""
+    try:
+        val = int(value, 0) # Supports '123' or '0xABC'
+        val = val & 0xFFFFFFFF # Ensure 32-bit
+        
+        # Convert to signed
+        signed_val = val if val < 0x80000000 else val - 0x100000000
+        self.ls3d_material_flags = signed_val
+    except ValueError:
+        pass
+    
+    # --- SECTOR FLAG UI HELPERS ---
+
+def get_sector_flags1_unsigned(self):
+    """Converts internal signed int to unsigned string for UI."""
+    val = self.ls3d_sector_flags1 & 0xFFFFFFFF
+    return str(val)
+
+def set_sector_flags1_unsigned(self, value):
+    """Converts UI string back to signed int for storage."""
+    try:
+        val = int(value, 0)
+        val = val & 0xFFFFFFFF
+        # Convert to signed 32-bit
+        signed_val = val if val < 0x80000000 else val - 0x100000000
+        self.ls3d_sector_flags1 = signed_val
+    except ValueError:
+        pass
+
+def get_sector_flags2_unsigned(self):
+    val = self.ls3d_sector_flags2 & 0xFFFFFFFF
+    return str(val)
+
+def set_sector_flags2_unsigned(self, value):
+    try:
+        val = int(value, 0)
+        val = val & 0xFFFFFFFF
+        signed_val = val if val < 0x80000000 else val - 0x100000000
+        self.ls3d_sector_flags2 = signed_val
+    except ValueError:
+        pass
+
+# --- GLOBAL CONSTANTS FOR ENUM ---
+LS3D_FRAME_ITEMS = (
+    ('1', "Visual", "Standard Mesh (FRAME_VISUAL)"),
+    ('5', "Sector", "Sector/Portal (FRAME_SECTOR)"),
+    ('6', "Dummy", "Helper/Mount Point (FRAME_DUMMY)"),
+    ('7', "Target", "Target/LookAt (FRAME_TARGET)"),
+    ('9', "Model", "External Model Ref (FRAME_MODEL)"),
+    ('10', "Joint", "Bone/Joint (FRAME_JOINT)"),
+    ('12', "Occluder", "Visibility Occluder (FRAME_OCCLUDER)"),
+)
+
+# --- PROPERTY CALLBACKS ---
+def get_frame_type_callback(self):
+    """Calculates the Enum Index based on the object type."""
+    stored_val = self.ls3d_frame_type_override
+    target_id = '6' # Default to Dummy
+    
+    if stored_val != 0:
+        target_id = str(stored_val)
+    else:
+        # Auto-Detect based on Blender Object
+        if self.type == 'MESH':
+            if "sector" in self.name.lower(): target_id = '5'
+            elif "portal" in self.name.lower(): target_id = '1'
+            elif self.display_type == 'WIRE': target_id = '12'
+            else: target_id = '1'
+        # Removed detection for LIGHT, CAMERA, SPEAKER
+        elif self.type == 'EMPTY':
+            if self.empty_display_type == 'PLAIN_AXES': target_id = '7'
+            elif self.empty_display_type == 'SINGLE_ARROW': target_id = '9'
+            else: target_id = '6'
+        elif self.type == 'ARMATURE': 
+            target_id = '10' # FRAME_JOINT
+        
+    # Find the index of this ID in the items list
+    for i, item in enumerate(LS3D_FRAME_ITEMS):
+        if item[0] == target_id:
+            return i
+    return 0
+
+def set_frame_type_callback(self, value):
+    """Saves the selected Enum value and updates viewport display immediately."""
+    if 0 <= value < len(LS3D_FRAME_ITEMS):
+        selected_id = int(LS3D_FRAME_ITEMS[value][0])
+        self.ls3d_frame_type_override = selected_id
+        
+        # --- VISUAL FEEDBACK LOGIC ---
+        
+        # Case A: Wireframe Objects (Sector=5, Occluder=12)
+        if selected_id in (5, 12): 
+            self.display_type = 'WIRE'      # Set viewport draw mode to Wire
+            self.show_all_edges = True      # CRITICAL: Show internal triangulation lines even on flat faces
+            self.show_wire = True           # Force wireframe overlay on
+            
+        # Case B: Standard Visual (1)
+        elif selected_id == 1: 
+            self.display_type = 'TEXTURED'  # Standard solid view
+            self.show_all_edges = False     # Optimize display (hide internal diagonals)
+            self.show_wire = False
+            
+        # Case C: Dummies/Helpers (6, 7, 9, 10)
+        # Note: If it's a Mesh acting as a dummy, we usually want bounds or wire
+        elif self.type == 'MESH':
+             if selected_id != 1:
+                 self.display_type = 'WIRE'
+
 # --- REGISTRATION ---
 
-def unregister():
-    # 1. Clean up Menu Entries
-    try:
-        bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
-        bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
-    except: pass
-
-    # 2. Clean up Properties
-    # (Delete all the ls3d_... properties here)
-    del bpy.types.Material.ls3d_diffuse_color
-    del bpy.types.Material.ls3d_ambient_color
-    del bpy.types.Material.ls3d_emission_color
-    del bpy.types.Material.ls3d_diff_enabled
-    del bpy.types.Material.ls3d_diff_colored
-    del bpy.types.Material.ls3d_diff_anim
-    del bpy.types.Material.ls3d_diff_frame_count
-    del bpy.types.Material.ls3d_diff_frame_period
-    del bpy.types.Material.ls3d_diff_mipmap
-    del bpy.types.Material.ls3d_diff_2sided
-    del bpy.types.Material.ls3d_env_enabled
-    del bpy.types.Material.ls3d_env_overlay
-    del bpy.types.Material.ls3d_env_multiply
-    del bpy.types.Material.ls3d_env_additive
-    del bpy.types.Material.ls3d_env_yproj
-    del bpy.types.Material.ls3d_env_ydet
-    del bpy.types.Material.ls3d_env_zdet
-    del bpy.types.Material.ls3d_alpha_enabled
-    del bpy.types.Material.ls3d_alpha_effect
-    del bpy.types.Material.ls3d_alpha_colorkey
-    del bpy.types.Material.ls3d_alpha_addmix
-    del bpy.types.Material.ls3d_alpha_anim
-    del bpy.types.Material.ls3d_alpha_imgalpha
-    del bpy.types.Material.ls3d_disable_tex
-    
-    # Delete new ones
-    del bpy.types.Material.ls3d_calc_reflect_y
-    del bpy.types.Material.ls3d_proj_reflect_y
-    del bpy.types.Material.ls3d_proj_reflect_z
-    
-    del bpy.types.Material.ls3d_misc_unlit
-    del bpy.types.Material.ls3d_misc_tile_u
-    del bpy.types.Material.ls3d_misc_tile_v
-    del bpy.types.Material.ls3d_misc_zwrite
-
-    # ... Delete Object properties (cull_flags, etc) ... 
-    del bpy.types.Object.visual_type
-    del bpy.types.Object.cull_flags
-    del bpy.types.Object.render_flags
-    del bpy.types.Object.render_flags2
-    del bpy.types.Object.rf1_cast_shadow
-    del bpy.types.Object.rf1_receive_shadow
-    del bpy.types.Object.rf1_draw_last
-    del bpy.types.Object.rf1_zbias
-    del bpy.types.Object.rf1_active
-    del bpy.types.Object.rf2_decal
-    del bpy.types.Object.rf2_stencil
-    del bpy.types.Object.rf2_mirror
-    del bpy.types.Object.rf2_proj
-    del bpy.types.Object.rf2_nofog
-    del bpy.types.Object.cf_visible
-    del bpy.types.Object.cf_coll_player
-    del bpy.types.Object.cf_coll_ai
-    del bpy.types.Object.cf_coll_vehicle
-    del bpy.types.Object.cf_coll_camera
-    del bpy.types.Object.cf_coll_proj
-    del bpy.types.Object.cf_coll_item
-    del bpy.types.Object.cf_light_int
-    del bpy.types.Object.ls3d_user_props
-    del bpy.types.Object.ls3d_lod_dist
-    del bpy.types.Object.ls3d_portal_flags
-    del bpy.types.Object.ls3d_portal_near
-    del bpy.types.Object.ls3d_portal_far
-    del bpy.types.Object.ls3d_portal_unknown
-    del bpy.types.Object.ls3d_portal_enabled
-    del bpy.types.Object.ls3d_sector_flags1
-    del bpy.types.Object.ls3d_sector_flags2
-    del bpy.types.Object.rot_axis
-    del bpy.types.Object.rot_mode
-    del bpy.types.Object.mirror_color
-    del bpy.types.Object.mirror_dist
-    del bpy.types.Object.bbox_min
-    del bpy.types.Object.bbox_max
-
-    # 3. Unregister Classes
-    bpy.utils.unregister_class(LS3D_OT_AddEnvSetup)
-    bpy.utils.unregister_class(LS3D_OT_AddNode)
-    bpy.utils.unregister_class(The4DSPanelMaterial)
-    bpy.utils.unregister_class(The4DSPanel)
-    bpy.utils.unregister_class(Import4DS)
-    bpy.utils.unregister_class(Export4DS)
-
-
 def register():
-    # --- HELPER / ENUMS ---
-    bpy.types.Object.visual_type = EnumProperty(
-        name="Mesh Type",
-        items=(
-            ('0', "Object", "Standard static mesh"), 
-            ('1', "Lit Object", "Static object with pre-calc lighting"), 
-            ('2', "Single Mesh", "Optimized single-buffer mesh"), 
-            ('3', "Single Morph", "Single mesh with morphs"), 
-            ('4', "Billboard", "Sprite rotating to camera"), 
-            ('5', "Morph", "Standard mesh with morphs"), 
-            ('6', "Lens", "Lens flare"), 
-            ('7', "Projector", "Texture projector"), 
-            ('8', "Mirror", "Reflection surface"), 
-            ('9', "Emitor", "Particle emitter"), 
-            ('10', "Shadow", "Shadow volume mesh"), 
-            ('11', "Land Patch", "Terrain geometry")
-        ),
-        default='0'
-    )
-    
-    # --- RAW INTEGER STORAGE ---
-    bpy.types.Object.cull_flags = IntProperty(name="Culling & Collision Flags", default=1, min=0, max=255, description="Collision and Visibility bitmask") # Cull Flags
-    bpy.types.Object.render_flags = IntProperty(name="Render Flags Primary", default=128, min=0, max=255, description="Visual rendering properties") # Render Flags 1
-    bpy.types.Object.render_flags2 = IntProperty(name="Render Flags Secondary", default=8, min=0, max=255, description="Logical rendering properties") # Render Flags 2
-    
-    # --- RENDER FLAGS 1 (Visual) ---
-    bpy.types.Object.rf1_cast_shadow = BoolProperty(name="Casts Shadow", get=make_getter("render_flags", 0), set=make_setter("render_flags", 0), description="Object casts a shadow")
-    bpy.types.Object.rf1_receive_shadow = BoolProperty(name="Receives Shadow", get=make_getter("render_flags", 1), set=make_setter("render_flags", 1), description="Object receives shadows")
-    bpy.types.Object.rf1_draw_last = BoolProperty(name="Draw Last (Alpha)", get=make_getter("render_flags", 2), set=make_setter("render_flags", 2), description="Forces the object to render after opaque objects. Required for transparent objects")
-    bpy.types.Object.rf1_zbias = BoolProperty(name="Z-Bias (Overlay)", get=make_getter("render_flags", 3), set=make_setter("render_flags", 3), description="Disables Z-Buffer depth check (Always on top, prevents Z-Fighting of two coplanar surfaces)")
-    bpy.types.Object.rf1_active = BoolProperty(name="Active", get=make_getter("render_flags", 7), set=make_setter("render_flags", 7), description="Renderer sees and renders the object normally")
-
-    # --- RENDER FLAGS 2 (Logic) ---
-    bpy.types.Object.rf2_decal = BoolProperty(name="Is Decal", get=make_getter("render_flags2", 0), set=make_setter("render_flags2", 0), description="Draws coplanar on top of other mesh")
-    bpy.types.Object.rf2_stencil = BoolProperty(name="Shadow Volume", get=make_getter("render_flags2", 1), set=make_setter("render_flags2", 1), description="Object is a stencil shadow object/volume")
-    bpy.types.Object.rf2_mirror = BoolProperty(name="Mirrorable", get=make_getter("render_flags2", 2), set=make_setter("render_flags2", 2), description="Visible in mirrors")
-    bpy.types.Object.rf2_proj = BoolProperty(name="Recieves Projection", get=make_getter("render_flags2", 5), set=make_setter("render_flags2", 5), description="Receives projected textures (headlights)")
-    bpy.types.Object.rf2_nofog = BoolProperty(name="No Fog", get=make_getter("render_flags2", 7), set=make_setter("render_flags2", 7), description="Disables fog shading for this object")
-
-    # --- CULL FLAGS (Collision/Visibility) ---
-    bpy.types.Object.cf_visible = BoolProperty(name="Visible", get=make_getter("cull_flags", 0), set=make_setter("cull_flags", 0), description="Global object culling (Can be toggled with scripts)")
-    bpy.types.Object.cf_coll_player = BoolProperty(name="Player", get=make_getter("cull_flags", 1), set=make_setter("cull_flags", 1), description="Collision with Player/Humans")
-    bpy.types.Object.cf_coll_ai = BoolProperty(name="AI/Bullet", get=make_getter("cull_flags", 2), set=make_setter("cull_flags", 2), description="Collision with AI and Bullets (Small)")
-    bpy.types.Object.cf_coll_vehicle = BoolProperty(name="Vehicle", get=make_getter("cull_flags", 3), set=make_setter("cull_flags", 3), description="Collision with Vehicles")
-    bpy.types.Object.cf_coll_camera = BoolProperty(name="Camera", get=make_getter("cull_flags", 4), set=make_setter("cull_flags", 4), description="Collision with Camera")
-    bpy.types.Object.cf_coll_proj = BoolProperty(name="Projectile", get=make_getter("cull_flags", 5), set=make_setter("cull_flags", 5), description="Collision with Rockets/Grenades")
-    bpy.types.Object.cf_coll_item = BoolProperty(name="Item/Move", get=make_getter("cull_flags", 6), set=make_setter("cull_flags", 6), description="Collision with Movable items")
-    bpy.types.Object.cf_light_int = BoolProperty(name="Light Interact", get=make_getter("cull_flags", 7), set=make_setter("cull_flags", 7), description="Interacts with scene lighting")
-
-    # --- OTHER PARAMS ---
-    bpy.types.Object.ls3d_user_props = StringProperty(name="String Parameters", description="Frame properties")
-    bpy.types.Object.ls3d_lod_dist = FloatProperty(name="Fade-in Distance", default=100.0, description="Distance at which this LOD becomes visible")
-    
-    # Portal/Sector
-    bpy.types.Object.ls3d_portal_flags = IntProperty(name="Flags", default=4)
-    bpy.types.Object.ls3d_portal_near = FloatProperty(name="Near Range", default=0.0)
-    bpy.types.Object.ls3d_portal_far = FloatProperty(name="Far Range", default=100.0)
-    bpy.types.Object.ls3d_portal_unknown = FloatProperty(name="Unknown", default=0.0)
-    bpy.types.Object.ls3d_portal_enabled = BoolProperty(name="Enabled", get=make_getter("ls3d_portal_flags", 2), set=make_setter("ls3d_portal_flags", 2))
-    
-    bpy.types.Object.ls3d_sector_flags1 = IntProperty(default=2049, name="Sector Flags 1")
-    bpy.types.Object.ls3d_sector_flags2 = IntProperty(default=0, name="Sector Flags 2")
-    
-    # Specifics
-    bpy.types.Object.rot_axis = EnumProperty(name="Rotation Axis", items=(('0', "X", ""), ('1', "Z", ""), ('2', "Y", "")), default='1')
-    bpy.types.Object.rot_mode = EnumProperty(name="Rotation Mode", items=(('0', "All Axes", ""), ('1', "Single Axis", "")), default='0')
-    bpy.types.Object.mirror_color = FloatVectorProperty(subtype='COLOR', default=(0,0,0), name="Mirror Color", description="Tint color of the Mirror")
-    bpy.types.Object.mirror_dist = FloatProperty(default=100.0, name="Mirror Distance", description="Distance of how far the Mirror will mirror objects")
-    bpy.types.Object.bbox_min = FloatVectorProperty(subtype='XYZ')
-    bpy.types.Object.bbox_max = FloatVectorProperty(subtype='XYZ')
-
-    # --- MATERIAL PROPS ---
-    
-    # 1. Colors
-    bpy.types.Material.ls3d_diffuse_color = FloatVectorProperty(subtype='COLOR', default=(1,1,1), name="Diffuse Color", description="Main surface color")
-    bpy.types.Material.ls3d_ambient_color = FloatVectorProperty(subtype='COLOR', default=(0.5,0.5,0.5), name="Ambient Color", description="Environment/Shadow color influence")
-    bpy.types.Material.ls3d_emission_color = FloatVectorProperty(subtype='COLOR', default=(0,0,0), name="Emission Color", description="Self-illumination color")
-    
-    # 2. Diffuse Flags
-    bpy.types.Material.ls3d_diff_enabled = BoolProperty(default=True, name="Diffuse Enabled", description="Enable diffuse texturing (MTL_DIFFUSETEX)")
-    bpy.types.Material.ls3d_diff_colored = BoolProperty(name="Use Vertex Colors", description="Blend vertex colors with texture (MTL_COLORED)")
-    bpy.types.Material.ls3d_diff_anim = BoolProperty(name="Animated Texture", description="Enable texture animation (MTL_ANIMATED_DIFFUSE)")
-    bpy.types.Material.ls3d_diff_frame_count = IntProperty(default=0, name="Frame Count")
-    bpy.types.Material.ls3d_diff_frame_period = IntProperty(default=0, name="Frame Period (ms)")
-    bpy.types.Material.ls3d_diff_mipmap = BoolProperty(default=True, name="Use MipMaps", description="Enable mipmapping (MTL_MIPMAP)")
-    bpy.types.Material.ls3d_diff_2sided = BoolProperty(name="Double Sided", description="Render both sides of faces (MTL_DOUBLESIDED)")
-    
-    # 3. Environment Flags
-    bpy.types.Material.ls3d_env_enabled = BoolProperty(name="Environment Map", description="Enable environmental reflection (MTL_ENVMAP)")
-    bpy.types.Material.ls3d_env_overlay = BoolProperty(name="Env Overlay", description="Overlay environment on diffuse (MTL_ENV_OVERLAY)")
-    bpy.types.Material.ls3d_env_multiply = BoolProperty(default=True, name="Env Multiply", description="Multiply environment with diffuse (MTL_ENV_MULTIPLY)")
-    bpy.types.Material.ls3d_env_additive = BoolProperty(name="Env Additive", description="Add environment to diffuse (MTL_ENV_ADDITIVE)")
-    bpy.types.Material.ls3d_env_yproj = BoolProperty(name="Env Y-Proj", description="Y-Axis Projection (MTL_ENV_PROJECT_Y)")
-    bpy.types.Material.ls3d_env_ydet = BoolProperty(name="Env Y-Det", description="Y-Determined mapping (MTL_ENV_DETERMINED_Y)")
-    bpy.types.Material.ls3d_env_zdet = BoolProperty(name="Env Z-Det", description="Z-Determined mapping (MTL_ENV_DETERMINED_Z)")
-    
-    # 4. Alpha Flags
-    bpy.types.Material.ls3d_alpha_enabled = BoolProperty(name="Alpha Map", description="Enable alpha mask texture")
-    bpy.types.Material.ls3d_alpha_effect = BoolProperty(name="Alpha Effect", description="Special alpha effect mode (MTL_ENV_ADDEFFECT)")
-    bpy.types.Material.ls3d_alpha_colorkey = BoolProperty(name="Color Key", description="Hard cutout transparency. Color key is the first indexed value in BMP color table")
-    bpy.types.Material.ls3d_alpha_addmix = BoolProperty(name="Additive Mix", description="Additive blending (MTL_ADDITIVE)")
-    bpy.types.Material.ls3d_alpha_anim = BoolProperty(name="Animated Alpha", description="Animated alpha texture (MTL_ANIMATED_ALPHA)")
-    bpy.types.Material.ls3d_alpha_imgalpha = BoolProperty(name="Use Image Alpha", description="Use alpha channel embedded in the diffuse texture (MTL_ALPHA_IN_TEX)")
-    
-    # 5. Misc & Reflection Calc
-    bpy.types.Material.ls3d_disable_tex = BoolProperty(name="Disable Texture", description="Force disable texturing (MTL_ENV_DISABLE_TEX)")
-    
-    bpy.types.Material.ls3d_calc_reflect_y = BoolProperty(name="Calc Reflect Y (Wet)", description="Calculate Reflection Y. Used for Wet Roads (MTL_CALCREFLECTTEXY)")
-    bpy.types.Material.ls3d_proj_reflect_y = BoolProperty(name="Proj Reflect Y", description="Project Reflection Y (MTL_PROJECTREFLECTTEXY)")
-    bpy.types.Material.ls3d_proj_reflect_z = BoolProperty(name="Proj Reflect Z", description="Project Reflection Z (MTL_PROJECTREFLECTTEXZ)")
-    
-    bpy.types.Material.ls3d_misc_unlit = BoolProperty(name="Unlit", description="Disable lighting (FullBright) (MTL_MISC_UNLIT)")
-    bpy.types.Material.ls3d_misc_tile_u = BoolProperty(default=True, name="Tile U", description="Repeat texture horizontally")
-    bpy.types.Material.ls3d_misc_tile_v = BoolProperty(default=True, name="Tile V", description="Repeat texture vertically")
-    bpy.types.Material.ls3d_misc_zwrite = BoolProperty(name="Z-Write", description="Write to Z-Buffer")
-
     # Classes
+    bpy.utils.register_class(LS3D_AddonPreferences)
     bpy.utils.register_class(LS3D_OT_AddEnvSetup)
     bpy.utils.register_class(LS3D_OT_AddNode)
     bpy.utils.register_class(The4DSPanelMaterial)
     bpy.utils.register_class(The4DSPanel)
     bpy.utils.register_class(Import4DS)
     bpy.utils.register_class(Export4DS)
+
+    # --- SCENE ---
+    bpy.types.Scene.ls3d_is_animated = BoolProperty(name="Is Animated", default=False)
+
+    # --- OBJECT PROPERTIES ---
+    bpy.types.Object.ls3d_frame_type_override = IntProperty(default=0)
+    bpy.types.Object.ls3d_frame_type = EnumProperty(name="Frame Type", items=LS3D_FRAME_ITEMS, get=get_frame_type_callback, set=set_frame_type_callback)
     
+    bpy.types.Object.visual_type = EnumProperty(
+        name="Mesh Type", 
+        items=(
+            ('0', "Standard", "Standard Static Mesh"), 
+            ('1', "Lit Object", "Pre-lit Object"), 
+            ('2', "Single Mesh", "Skinned Mesh"), 
+            ('3', "Single Morph", "Car/Morph Mesh"), 
+            ('4', "Billboard", "Sprite/Billboard"), 
+            ('5', "Morph", "Character Morph"), 
+            ('6', "Lens Flare", "Lens Flare Source"), 
+            ('7', "Projector", "Light Projector"),
+            ('8', "Mirror", "Reflection Plane"),
+            ('9', "Emitor", "Particle Emitter")
+        ), 
+        default='0'
+    )
+    
+    # --- OBJECT CULLING FLAGS ---
+    bpy.types.Object.cull_flags = IntProperty(name="Culling Flags", default=0, min=0)
+    bpy.types.Object.cf_node_visible = BoolProperty(name="Visible", get=make_getter("cull_flags", 0), set=make_setter("cull_flags", 0))
+    bpy.types.Object.cf_node_cam_coll = BoolProperty(name="Camera Collision", get=make_getter("cull_flags", 1), set=make_setter("cull_flags", 1))
+    bpy.types.Object.cf_node_collision = BoolProperty(name="Physics Collision", get=make_getter("cull_flags", 2), set=make_setter("cull_flags", 2))
+    bpy.types.Object.cf_node_castshadow = BoolProperty(name="Cast Shadow", get=make_getter("cull_flags", 3), set=make_setter("cull_flags", 3))
+    bpy.types.Object.cf_node_update = BoolProperty(name="Update/Movable", get=make_getter("cull_flags", 4), set=make_setter("cull_flags", 4))
+    bpy.types.Object.cf_node_freeze = BoolProperty(name="Freeze/Static", get=make_getter("cull_flags", 5), set=make_setter("cull_flags", 5))
+    bpy.types.Object.cf_node_hierarchy = BoolProperty(name="Hierarchy", get=make_getter("cull_flags", 6), set=make_setter("cull_flags", 6))
+    
+    # --- VISUAL RENDER FLAGS ---
+    bpy.types.Object.render_flags = IntProperty(name="Render Flags 1", default=0, min=0)
+    bpy.types.Object.render_flags2 = IntProperty(name="Render Flags 2", default=0, min=0)
+    
+    bpy.types.Object.rf1_cast_shadow = BoolProperty(name="Cast Shadow", get=make_getter("render_flags", 0), set=make_setter("render_flags", 0))
+    bpy.types.Object.rf1_receive_shadow = BoolProperty(name="Receive Shadow", get=make_getter("render_flags", 1), set=make_setter("render_flags", 1))
+    bpy.types.Object.rf1_draw_last = BoolProperty(name="Draw Last", get=make_getter("render_flags", 2), set=make_setter("render_flags", 2))
+    bpy.types.Object.rf1_zbias = BoolProperty(name="Z-Bias", get=make_getter("render_flags", 3), set=make_setter("render_flags", 3))
+    bpy.types.Object.rf1_bright = BoolProperty(name="Bright (Unlit)", get=make_getter("render_flags", 4), set=make_setter("render_flags", 4))
+    
+    bpy.types.Object.rf2_decal = BoolProperty(name="Decal", get=make_getter("render_flags2", 0), set=make_setter("render_flags2", 0))
+    bpy.types.Object.rf2_stencil = BoolProperty(name="Stencil", get=make_getter("render_flags2", 1), set=make_setter("render_flags2", 1))
+    bpy.types.Object.rf2_mirror = BoolProperty(name="Mirror", get=make_getter("render_flags2", 2), set=make_setter("render_flags2", 2))
+    bpy.types.Object.rf2_fadeout = BoolProperty(name="Fade Out", get=make_getter("render_flags2", 3), set=make_setter("render_flags2", 3))
+    bpy.types.Object.rf2_proj = BoolProperty(name="Projector", get=make_getter("render_flags2", 5), set=make_setter("render_flags2", 5))
+    bpy.types.Object.rf2_nofog = BoolProperty(name="No Fog", get=make_getter("render_flags2", 7), set=make_setter("render_flags2", 7))
+
+    # --- MATERIAL PROPERTIES ---
+    bpy.types.Material.ls3d_ambient_color = FloatVectorProperty(subtype='COLOR', default=(0.5,0.5,0.5), name="Ambient")
+    bpy.types.Material.ls3d_diffuse_color = FloatVectorProperty(subtype='COLOR', default=(1,1,1), name="Diffuse")
+    bpy.types.Material.ls3d_emission_color = FloatVectorProperty(subtype='COLOR', default=(0,0,0), name="Emission")
+
+    # Animations
+    bpy.types.Material.ls3d_diffuse_anim_frames = IntProperty(name="Diff Frames", default=0)
+    bpy.types.Material.ls3d_diffuse_anim_period = IntProperty(name="Diff Period", default=0)
+    bpy.types.Material.ls3d_alpha_anim_frames = IntProperty(name="Alpha Frames", default=0)
+    bpy.types.Material.ls3d_alpha_anim_period = IntProperty(name="Alpha Period", default=0)
+
+    # --- MATERIAL FLAGS ---
+    bpy.types.Material.ls3d_material_flags = IntProperty(name="Material Flags", default=0)
+    bpy.types.Material.ls3d_material_flags_str = StringProperty(name="Raw Flags", description="Raw Unsigned Integer", get=get_mat_flags_unsigned, set=set_mat_flags_unsigned)
+
+    # Boolean accessors
+    bpy.types.Material.ls3d_flag_misc_unlit = BoolProperty(name="Unlit", description="Disable lighting calculations (0x1)", get=make_getter("ls3d_material_flags", 0), set=make_setter("ls3d_material_flags", 0))
+    bpy.types.Material.ls3d_flag_env_overlay = BoolProperty(name="Env Overlay", get=make_getter("ls3d_material_flags", 8), set=make_setter("ls3d_material_flags", 8))
+    bpy.types.Material.ls3d_flag_env_multiply = BoolProperty(name="Env Multiply", get=make_getter("ls3d_material_flags", 9), set=make_setter("ls3d_material_flags", 9))
+    bpy.types.Material.ls3d_flag_env_additive = BoolProperty(name="Env Additive", get=make_getter("ls3d_material_flags", 10), set=make_setter("ls3d_material_flags", 10))
+    bpy.types.Material.ls3d_flag_env_use_map = BoolProperty(name="Use Env Map", get=make_getter("ls3d_material_flags", 11), set=make_setter("ls3d_material_flags", 11))
+    bpy.types.Material.ls3d_flag_env_projy = BoolProperty(name="Proj Y", get=make_getter("ls3d_material_flags", 12), set=make_setter("ls3d_material_flags", 12))
+    bpy.types.Material.ls3d_flag_env_detaily = BoolProperty(name="Detail Y", get=make_getter("ls3d_material_flags", 13), set=make_setter("ls3d_material_flags", 13))
+    bpy.types.Material.ls3d_flag_env_detailz = BoolProperty(name="Detail Z", get=make_getter("ls3d_material_flags", 14), set=make_setter("ls3d_material_flags", 14))
+    
+    bpy.types.Material.ls3d_flag_alpha_enable = BoolProperty(name="Alpha Enable", description="Enables alpha effect, if No Alpha Texture is specified, game looks for the Diffuse Texture Name that ends with + and uses it as Alpha Texture in LS3D Engine", get=make_getter("ls3d_material_flags", 15), set=make_setter("ls3d_material_flags", 15))
+    bpy.types.Material.ls3d_flag_disable_u_tiling = BoolProperty(name="Disable U-Tile", get=make_getter("ls3d_material_flags", 16), set=make_setter("ls3d_material_flags", 16))
+    bpy.types.Material.ls3d_flag_disable_v_tiling = BoolProperty(name="Disable V-Tile", get=make_getter("ls3d_material_flags", 17), set=make_setter("ls3d_material_flags", 17))
+    
+    bpy.types.Material.ls3d_flag_diffuse_enable = BoolProperty(name="Use Diffuse", get=make_getter("ls3d_material_flags", 18), set=make_setter("ls3d_material_flags", 18))
+    bpy.types.Material.ls3d_flag_env_enable = BoolProperty(name="Env Enable", get=make_getter("ls3d_material_flags", 19), set=make_setter("ls3d_material_flags", 19))
+    bpy.types.Material.ls3d_flag_diffuse_mipmap = BoolProperty(name="MipMap", get=make_getter("ls3d_material_flags", 23), set=make_setter("ls3d_material_flags", 23))
+    
+    bpy.types.Material.ls3d_flag_alpha_in_tex = BoolProperty(name="Alpha In Tex", get=make_getter("ls3d_material_flags", 24), set=make_setter("ls3d_material_flags", 24))
+    bpy.types.Material.ls3d_flag_alpha_animated = BoolProperty(name="Anim Alpha", get=make_getter("ls3d_material_flags", 25), set=make_setter("ls3d_material_flags", 25))
+    bpy.types.Material.ls3d_flag_diffuse_animated = BoolProperty(name="Anim Diffuse", get=make_getter("ls3d_material_flags", 26), set=make_setter("ls3d_material_flags", 26))
+    bpy.types.Material.ls3d_flag_diffuse_colored = BoolProperty(name="Vertex Colors", get=make_getter("ls3d_material_flags", 27), set=make_setter("ls3d_material_flags", 27))
+    bpy.types.Material.ls3d_flag_diffuse_doublesided = BoolProperty(name="Double Sided", get=make_getter("ls3d_material_flags", 28), set=make_setter("ls3d_material_flags", 28))
+    bpy.types.Material.ls3d_flag_alpha_colorkey = BoolProperty(name="Color Key", get=make_getter("ls3d_material_flags", 29), set=make_setter("ls3d_material_flags", 29))
+    bpy.types.Material.ls3d_flag_alphatex = BoolProperty(name="Alpha Texture", get=make_getter("ls3d_material_flags", 30), set=make_setter("ls3d_material_flags", 30))
+    bpy.types.Material.ls3d_flag_alpha_additive = BoolProperty(name="Additive", get=make_getter("ls3d_material_flags", 31), set=make_setter("ls3d_material_flags", 31))
+
+    # Standard Props
+    bpy.types.Object.ls3d_lod_dist = FloatProperty(name="LOD Dist", default=0.0)
+    bpy.types.Object.ls3d_user_props = StringProperty(name="User Props")
+    bpy.types.Object.rot_mode = EnumProperty(items=(('1','All',''),('2','Single','')), name="Rot Mode")
+    bpy.types.Object.rot_axis = EnumProperty(items=(('1','X',''),('2','Z',''),('3','Y','')), name="Rot Axis")
+    bpy.types.Object.mirror_color = FloatVectorProperty(name="Mirror Color")
+    bpy.types.Object.mirror_dist = FloatProperty(name="Mirror Dist")
+    bpy.types.Object.bbox_min = FloatVectorProperty(name="BBox Min")
+    bpy.types.Object.bbox_max = FloatVectorProperty(name="BBox Max")
+    
+    # --- SECTOR PROPS (FIXED) ---
+    # Internal Signed Storage with Limits
+    bpy.types.Object.ls3d_sector_flags1 = IntProperty(default=0)
+    bpy.types.Object.ls3d_sector_flags2 = IntProperty(default=0)
+    
+    # UI String Displays (Unsigned)
+    bpy.types.Object.ls3d_sector_flags1_str = StringProperty(name="Raw Flags 1", description="Raw Unsigned Integer", get=get_sector_flags1_unsigned, set=set_sector_flags1_unsigned)
+    bpy.types.Object.ls3d_sector_flags2_str = StringProperty(name="Raw Flags 2", description="Raw Unsigned Integer", get=get_sector_flags2_unsigned, set=set_sector_flags2_unsigned)
+
+    # Boolean accessors for Sector Flags 1
+    bpy.types.Object.sf_active = BoolProperty(name="Active", get=make_getter("ls3d_sector_flags1", 0), set=make_setter("ls3d_sector_flags1", 0))
+    bpy.types.Object.sf_collision = BoolProperty(name="Collision", get=make_getter("ls3d_sector_flags1", 10), set=make_setter("ls3d_sector_flags1", 10))
+    bpy.types.Object.sf_indoor = BoolProperty(name="Indoor", get=make_getter("ls3d_sector_flags1", 11), set=make_setter("ls3d_sector_flags1", 11))
+    
+    # Portal Props
+    bpy.types.Object.ls3d_portal_flags = IntProperty()
+    bpy.types.Object.ls3d_portal_near = FloatProperty()
+    bpy.types.Object.ls3d_portal_far = FloatProperty()
+    bpy.types.Object.pf_enabled = BoolProperty(name="Enabled", get=make_getter("ls3d_portal_flags", 2), set=make_setter("ls3d_portal_flags", 2))
+    bpy.types.Object.pf_mirror = BoolProperty(name="Mirror", get=make_getter("ls3d_portal_flags", 3), set=make_setter("ls3d_portal_flags", 3))
+    bpy.types.Object.pf_bit0 = BoolProperty(name="Bit 0", get=make_getter("ls3d_portal_flags", 0), set=make_setter("ls3d_portal_flags", 0))
+    bpy.types.Object.pf_bit1 = BoolProperty(name="Bit 1", get=make_getter("ls3d_portal_flags", 1), set=make_setter("ls3d_portal_flags", 1))
+
     try:
         bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
         bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
@@ -2705,5 +3350,112 @@ def register():
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
     
+def unregister():
+    try:
+        bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+        bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
+    except: pass
+    
+    del bpy.types.Scene.ls3d_is_animated
+    
+    # Object Props
+    del bpy.types.Object.ls3d_frame_type
+    del bpy.types.Object.ls3d_frame_type_override
+    del bpy.types.Object.visual_type
+    del bpy.types.Object.cull_flags
+    del bpy.types.Object.cf_node_visible
+    del bpy.types.Object.cf_node_collision
+    del bpy.types.Object.cf_node_castshadow
+    del bpy.types.Object.cf_node_update
+    del bpy.types.Object.cf_node_freeze
+    del bpy.types.Object.cf_node_visible
+    del bpy.types.Object.cf_node_cam_coll
+    del bpy.types.Object.cf_node_collision
+    del bpy.types.Object.cf_node_castshadow
+    del bpy.types.Object.cf_node_update
+    del bpy.types.Object.cf_node_freeze
+    del bpy.types.Object.cf_node_hierarchy
+    del bpy.types.Object.render_flags
+    del bpy.types.Object.render_flags2
+    del bpy.types.Object.rf1_cast_shadow
+    del bpy.types.Object.rf1_receive_shadow
+    del bpy.types.Object.rf1_draw_last
+    del bpy.types.Object.rf1_zbias
+    del bpy.types.Object.rf1_bright
+    del bpy.types.Object.rf2_decal
+    del bpy.types.Object.rf2_stencil
+    del bpy.types.Object.rf2_mirror
+    del bpy.types.Object.rf2_fadeout
+    del bpy.types.Object.rf2_proj
+    del bpy.types.Object.rf2_nofog
+    del bpy.types.Object.ls3d_lod_dist
+    del bpy.types.Object.ls3d_user_props
+    del bpy.types.Object.ls3d_sector_flags1
+    del bpy.types.Object.ls3d_sector_flags2
+    del bpy.types.Object.ls3d_sector_flags1_str
+    del bpy.types.Object.ls3d_sector_flags2_str
+    del bpy.types.Object.sf_active
+    del bpy.types.Object.sf_collision
+    del bpy.types.Object.sf_indoor
+    
+    del bpy.types.Object.ls3d_portal_flags
+    del bpy.types.Object.ls3d_portal_near
+    del bpy.types.Object.ls3d_portal_far
+    del bpy.types.Object.pf_enabled
+    del bpy.types.Object.pf_mirror
+    del bpy.types.Object.pf_bit0
+    del bpy.types.Object.pf_bit1
+    
+    del bpy.types.Object.rot_mode
+    del bpy.types.Object.rot_axis
+    del bpy.types.Object.mirror_color
+    del bpy.types.Object.mirror_dist
+    del bpy.types.Object.bbox_min
+    del bpy.types.Object.bbox_max
+
+    # Material Values
+    del bpy.types.Material.ls3d_ambient_color
+    del bpy.types.Material.ls3d_diffuse_color
+    del bpy.types.Material.ls3d_emission_color
+    
+    # New Split Props
+    del bpy.types.Material.ls3d_diffuse_anim_frames
+    del bpy.types.Material.ls3d_diffuse_anim_period
+    del bpy.types.Material.ls3d_alpha_anim_frames
+    del bpy.types.Material.ls3d_alpha_anim_period
+
+    # Material Flags
+    del bpy.types.Material.ls3d_material_flags
+    del bpy.types.Material.ls3d_material_flags_str
+    del bpy.types.Material.ls3d_flag_misc_unlit
+    del bpy.types.Material.ls3d_flag_env_overlay
+    del bpy.types.Material.ls3d_flag_env_multiply
+    del bpy.types.Material.ls3d_flag_env_additive
+    del bpy.types.Material.ls3d_flag_envtex
+    del bpy.types.Material.ls3d_flag_env_projy
+    del bpy.types.Material.ls3d_flag_env_detaily
+    del bpy.types.Material.ls3d_flag_env_detailz
+    del bpy.types.Material.ls3d_flag_alpha_enable
+    del bpy.types.Material.ls3d_flag_disable_u_tiling
+    del bpy.types.Material.ls3d_flag_disable_v_tiling
+    del bpy.types.Material.ls3d_flag_diffuse_enable
+    del bpy.types.Material.ls3d_flag_env_enable
+    del bpy.types.Material.ls3d_flag_diffuse_mipmap
+    del bpy.types.Material.ls3d_flag_alpha_in_tex
+    del bpy.types.Material.ls3d_flag_alpha_animated
+    del bpy.types.Material.ls3d_flag_diffuse_animated
+    del bpy.types.Material.ls3d_flag_diffuse_colored
+    del bpy.types.Material.ls3d_flag_diffuse_doublesided
+    del bpy.types.Material.ls3d_flag_alpha_colorkey
+    del bpy.types.Material.ls3d_flag_alphatex
+    del bpy.types.Material.ls3d_flag_alpha_additive
+
+    bpy.utils.unregister_class(LS3D_OT_AddEnvSetup)
+    bpy.utils.unregister_class(LS3D_OT_AddNode)
+    bpy.utils.unregister_class(The4DSPanelMaterial)
+    bpy.utils.unregister_class(The4DSPanel)
+    bpy.utils.unregister_class(Import4DS)
+    bpy.utils.unregister_class(Export4DS)
+
 if __name__ == "__main__":
     register()
