@@ -28,30 +28,17 @@ FRAME_VISUAL = 1        # 3D Object                 COMPLETE ?
 FRAME_LIGHT = 2         # UNUSPPORTED
 FRAME_CAMERA = 3
 FRAME_SOUND = 4
-FRAME_SECTOR = 5        # 3D Object Wireframe       ADD OPTION TO MAKE A CONVEX HULL, CHECK IF SECTOR IS CONVEX HULL BEFORE EXPORT, IF NOT, SHOW ERROR AND DENY EXPORT - (create a 4ds panel into N tool panel)
+FRAME_SECTOR = 5        # 3D Object Wireframe       
 FRAME_DUMMY = 6         # Empty (Cube)
 FRAME_TARGET = 7        # Empty (Plain Axis)
 FRAME_USER = 8          # HD2
 FRAME_MODEL = 9         # Empty (Arrows)            TO DO
 FRAME_JOINT = 10        # Armature/Bones            TO DO
 FRAME_VOLUME = 11       # HD2
-FRAME_OCCLUDER = 12     # 3D Object Wireframe       ADD OPTION TO MAKE A CONVEX HULL, CHECK IF OCCLUDER IS CONVEX HULL BEFORE EXPORT, IF NOT, SHOW ERROR AND DENY EXPORT (add a 4ds Item into N tool panel)
+FRAME_OCCLUDER = 12     # 3D Object Wireframe       
 FRAME_SCENE = 13        # HD2
 FRAME_AREA = 14         # HD2
 FRAME_LANDSCAPE = 15    # HD2
-
-# also add a "portals must be flat polygons, they cannot deviate, they have to be absolutely flat plane, max vertices are 32 (i think it needs to be an N-gon so only the perimeter vertices matter)
-
-# Add an option to show or hide the raw int values in 4ds side panels
-# //postponed - update smoothsahding to import and export stuff correctly / are we importing the mesh correctly? did we miss something such as seam markers, sharp corner markers?
-# Check if bones and weights are being imported and exported correctly using max4dstools or mafia_5ds on github as a reference
-# Check how 6DS files work to see if we can add custom Shadow Models
-# make sure we also export shape keys correctly
-# also make sure we stop export and display a visual error box to the user if occluder or sector aren't correct geometry (convex hull) and also if there are more than 32 vertices of a portal, we also stop export and display an error box to the user. 
-# All error boxes have to contain object name and reason for export interference.
-
-
-# Map vehicle dummies and create N panel with all dummy types for a specific thing of the vehicle.
 
 # Visual Types
 VISUAL_OBJECT = 0           # COMPLETE ?
@@ -3459,3 +3446,4 @@ def unregister():
 
 if __name__ == "__main__":
     register()
+
