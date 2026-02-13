@@ -1,4 +1,4 @@
-# Blender4dsTools
+# Blender4dsMafia
 This addon aims to bring Mafia 4ds models into Blender!
 
 ## Facts about the project
