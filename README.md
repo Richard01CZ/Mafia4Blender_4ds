@@ -1,7 +1,7 @@
 # Mafia4Blender 4ds
 This addon aims to bring Mafia 4ds models into Blender 5!
 
-If you encounter any issue with this addon, please open an issue here on github or send me a message in MafiaHub discord.
+If you encounter any issue with this addon, please open an issue here on github.
 
 ## Facts about the project
 - Initial project was started by Sevenisko, built upon and improved by Richard01_CZ
