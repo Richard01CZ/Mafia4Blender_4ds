@@ -13,7 +13,7 @@ from bpy.types import AddonPreferences # type: ignore
 bl_info = {
     "name": "LS3D 4DS Importer/Exporter",
     "author": "Richard01_CZ, Sev3n", # Special thanks to: Asa, Oravin, kirill_mapper, FlashX, sadness_smile, huckleberrypie
-    "version": (0, 6, 0, 'privateTest' ),
+    "version": (0, 6, 1),
     "blender": (5, 1, 0),
     "location": "File > Import/Export > 4DS Model File",
     "description": "Import and export LS3D .4ds model files (Mafia)",
@@ -4743,38 +4743,49 @@ class The4DSImporter:
         material.ls3d_opacity    = opacity
         material.ls3d_env_amount = env_amount
 
-        if use_color_key:
-            material.ls3d_flag_alpha_colorkey = True
-            # Read key color directly from disk NOW while we have the absolute path
-            if diffuse and self.maps_dir:
+        if use_color_key and diffuse:
+            abs_path = None
+            if self.maps_dir and os.path.isdir(self.maps_dir):
                 basename = os.path.basename(diffuse.lower())
-                abs_path = os.path.join(self.maps_dir, basename)
-                if not os.path.isfile(abs_path):
+                candidate = os.path.join(self.maps_dir, basename)
+                if os.path.isfile(candidate):
+                    abs_path = candidate
+                else:
                     try:
-                        for name in os.listdir(self.maps_dir):
-                            if name.lower() == basename:
-                                abs_path = os.path.join(self.maps_dir, name)
+                        for entry in os.listdir(self.maps_dir):
+                            if entry.lower() == basename:
+                                abs_path = os.path.join(self.maps_dir, entry)
                                 break
-                        else:
-                            abs_path = None
-                    except:
-                        abs_path = None
-                if abs_path:
-                    try:
-                        with open(abs_path, 'rb') as f:
-                            data = f.read()
-                        if data[0:2] == b'BM':
-                            dib_size  = int.from_bytes(data[14:18], 'little')
-                            bit_depth = int.from_bytes(data[28:30], 'little')
-                            if bit_depth in (1, 4, 8):
-                                b, g, r, _ = data[14 + dib_size : 18 + dib_size]
-                                material.ls3d_color_key = (
-                                    _srgb_to_linear(r / 255.0),
-                                    _srgb_to_linear(g / 255.0),
-                                    _srgb_to_linear(b / 255.0),
-                                )
-                    except Exception as e:
-                        print(f"LS3D: color key read failed for {diffuse}: {e}")
+                    except OSError:
+                        pass
+
+            if abs_path:
+                try:
+                    with open(abs_path, 'rb') as bmp_f:
+                        bmp_data = bmp_f.read()
+                    if bmp_data[0:2] == b'BM':
+                        dib_size  = int.from_bytes(bmp_data[14:18], 'little')
+                        bit_depth = int.from_bytes(bmp_data[28:30], 'little')
+                        if bit_depth in (1, 4, 8):
+                            ct_offset = 14 + dib_size
+                            b_val = bmp_data[ct_offset]
+                            g_val = bmp_data[ct_offset + 1]
+                            r_val = bmp_data[ct_offset + 2]
+                            material.ls3d_color_key = (
+                                _srgb_to_linear(r_val / 255.0),
+                                _srgb_to_linear(g_val / 255.0),
+                                _srgb_to_linear(b_val / 255.0),
+                            )
+                except Exception as e:
+                    print(f"LS3D: color key read failed for '{diffuse}': {e}")
+            else:
+                print(f"LS3D: WARNING: could not find '{diffuse}' to read color key. "
+                      f"Check the texture path in addon preferences.")
+
+            # Set flag AFTER ls3d_color_key is populated so the sync that fires
+            # immediately via the ls3d_material_flags update callback sees the
+            # correct color, not the default (0,0,0).
+            material.ls3d_flag_alpha_colorkey = True
 
         material.ls3d_diffuse_tex = load(diffuse)
         material.ls3d_alpha_tex   = load(alpha_tex)
@@ -6831,10 +6842,33 @@ def ls3d_sync_material_flags(mat):
 
     # ── Color key ─────────────────────────────────────────────────────────────
     if alpha_colorkey and ck_cmp_r and ck_cmp_g and ck_cmp_b:
-        key_color = tuple(mat.ls3d_color_key)
-        ck_cmp_r.inputs[1].default_value = key_color[0]
-        ck_cmp_g.inputs[1].default_value = key_color[1]
-        ck_cmp_b.inputs[1].default_value = key_color[2]
+        # If the stored key is still the default black (e.g. the flag was toggled
+        # in the UI after import, or maps_dir wasn't set during import), try to
+        # read palette entry 0 directly from the already-loaded image's filepath.
+        stored = tuple(mat.ls3d_color_key)
+        if stored == (0.0, 0.0, 0.0) and mat.ls3d_diffuse_tex:
+            img = mat.ls3d_diffuse_tex
+            filepath = img.filepath_from_user() if img.filepath else ""
+            if filepath and os.path.isfile(filepath):
+                try:
+                    with open(filepath, 'rb') as bmp_f:
+                        bmp_data = bmp_f.read()
+                    if bmp_data[0:2] == b'BM':
+                        dib_size  = int.from_bytes(bmp_data[14:18], 'little')
+                        bit_depth = int.from_bytes(bmp_data[28:30], 'little')
+                        if bit_depth in (1, 4, 8):
+                            ct = 14 + dib_size
+                            mat.ls3d_color_key = (
+                                _srgb_to_linear(bmp_data[ct + 2] / 255.0),
+                                _srgb_to_linear(bmp_data[ct + 1] / 255.0),
+                                _srgb_to_linear(bmp_data[ct    ] / 255.0),
+                            )
+                            stored = tuple(mat.ls3d_color_key)
+                except Exception as e:
+                    print(f"LS3D: color key sync read failed: {e}")
+        ck_cmp_r.inputs[1].default_value = stored[0]
+        ck_cmp_g.inputs[1].default_value = stored[1]
+        ck_cmp_b.inputs[1].default_value = stored[2]
 
     # ── Environment blend mode ────────────────────────────────────────────────
     active = env_enable and bool(mat.ls3d_env_tex)
