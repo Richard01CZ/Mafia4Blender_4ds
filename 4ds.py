@@ -13,7 +13,7 @@ from bpy.types import AddonPreferences # type: ignore
 bl_info = {
     "name": "LS3D 4DS Importer/Exporter",
     "author": "Richard01_CZ, Sev3n", # Special thanks to: Asa, Oravin, kirill_mapper, FlashX, sadness_smile, huckleberrypie
-    "version": (0, 6, 1),
+    "version": (0, 6, 2),
     "blender": (5, 1, 0),
     "location": "File > Import/Export > 4DS Model File",
     "description": "Import and export LS3D .4ds model files (Mafia)",
@@ -144,18 +144,14 @@ def _add_fix(text):
         _log_fixes.append(text)
 
 
-def log_clear(title, icon='INFO'):
+def log_clear(icon='INFO'):
     """Start a fresh log for an import/export operation."""
     global _log_title, _log_icon, _log_errors, _log_warns
-    _log_title = title
     _log_icon  = icon
     _log_errors = 0
     _log_warns  = 0
     _log_fixes.clear()
-    print(f"\n{'='*60}")
-    print(f"[LS3D] {title}")
-    print(f"{'='*60}")
-
+    
 
 def _set_log_title(title):
     """Update the popup title (e.g. to reflect success/failure)."""
@@ -163,10 +159,28 @@ def _set_log_title(title):
     _log_title = title
 
 
-def log_info(text):
-    """Print an info line to the console."""
-    print(f"[LS3D] {text}")
+def log_info(text, wrap=False):
+    """Print an info line to the console.
 
+        text: The message to print.
+        wrap: If True, wrap the message with a line of 60 '=' symbols above and below.
+    """
+    if wrap:
+        border = "=" * 60
+        print(border)
+        print(f"[LS3D] {text}")
+        print(border)
+    else:
+        print(f"[LS3D] {text}")
+
+
+def log_stage(text):
+    """Print a stage update for an operation"""
+    print(f"--- {text} ---")
+
+def log_substage(text):
+    """Print a sub-stage update for a stage operation"""
+    print(f"  > {text}")
 
 def log_warn(text):
     """Print a warning to the console and increment the warning count."""
@@ -183,15 +197,6 @@ def log_error(text):
     _log_errors += 1
     print(f"[LS3D] ERROR: {text}")
     _log_icon = 'CANCEL'
-
-
-def log_success(text):
-    """Print a success message to the console."""
-    global _log_icon
-    print(f"[LS3D] {text}")
-    if _log_icon == 'INFO':
-        _log_icon = 'CHECKMARK'
-
 
 def log_separator():
     """Print a blank line to the console."""
@@ -4601,11 +4606,6 @@ class The4DSImporter:
     def import_file(self):
         filename = os.path.basename(self.filepath)
         
-        # Initial Console Log
-        print("\n" + "="*60)
-        print(f"LS3D IMPORT STARTED: {filename}")
-        print("="*60)
-
         # Setup Progress Bar
         wm = bpy.context.window_manager
         wm.progress_begin(0, 100)
@@ -4633,7 +4633,7 @@ class The4DSImporter:
                 # 2. Materials
                 mat_count = struct.unpack("<H", f.read(2))[0]
                 log_info(f"Materials: {mat_count}")
-                print(f"--- READING MATERIALS ({mat_count}) ---")
+                log_stage("READING MATERIALS")
                 
                 self.materials = [None]
                 for i in range(mat_count):
@@ -4657,7 +4657,7 @@ class The4DSImporter:
                 # 3. Frames
                 frame_count = struct.unpack("<H", f.read(2))[0]
                 log_info(f"Frames: {frame_count}")
-                print(f"--- READING FRAMES ({frame_count}) ---")
+                log_stage("READING FRAMES")
                 
                 frames = []
                 for i in range(frame_count):
@@ -4673,24 +4673,23 @@ class The4DSImporter:
                         continue
 
                 # 4. Post Processing
-                print("--- POST PROCESSING ---")
+                log_stage("POST PROCESSING")
 
                 # FIX: Check self.joints instead of self.skinned_meshes
                 # This ensures armature is built even if no skin mesh exists (e.g. animation files)
                 if self.joints:
-                    log_info(f"Building armature ({len(self.joints)} joints)")
-                    print("  > Building armature...")
+                    log_substage(f"Building armature ({len(self.joints)} joints)")
                     self.build_armature()
 
-                log_info("Applying hierarchy")
+                log_substage("Applying hierarchy")
                 self.apply_deferred_parenting()
 
                 if self.skinned_meshes:
-                    log_info(f"Applying skinning ({len(self.skinned_meshes)} mesh(es))")
+                    log_substage(f"Applying skinning ({len(self.skinned_meshes)} mesh(es))")
                     for mesh_obj, weights, _, is_primary in self.skinned_meshes:
                         self.apply_skinning(mesh_obj, weights, reparent=is_primary)
 
-                log_info("Resolving target links")
+                log_substage("Resolving target links")
                 self.resolve_target_links(frames)
 
                 # Check Animated object count
@@ -4703,10 +4702,7 @@ class The4DSImporter:
                         log_info(f"Animated object count: {anim_count}")
                 except Exception as e:
                     log_warn(f"Reading animated object count: {e}")
-                    print(f"  > Warning reading animated object count: {e}")
-
-                
-                print(f"Import completed successfully: {filename}")
+                    log_substage(f"Warning reading animated object count: {e}")
 
         except Exception as e:
             log_error(f"Critical error: {e}")
@@ -4716,7 +4712,6 @@ class The4DSImporter:
         
         finally:
             # Cleanup UI state even if error occurs
-            print("="*60)
             wm.progress_end()
             bpy.context.window.cursor_set("DEFAULT")
 
@@ -6269,8 +6264,9 @@ class Export4DS(bpy.types.Operator, ExportHelper):
         filepath = self.filepath
         filename = os.path.basename(filepath)
 
-        log_clear(f"Exporting: {filename}")
-        log_info(f"Exporting {filename} ...")
+        log_clear()
+        log_separator()
+        log_info(f"Exporting: {filename}", wrap=True)
 
         wm = context.window_manager
         wm.progress_begin(0, 100)
@@ -6303,8 +6299,7 @@ class Export4DS(bpy.types.Operator, ExportHelper):
             _show_log()
             return {'CANCELLED'}
 
-        log_separator()
-        log_success(f"Export complete: {filename}")
+        log_info(f"Export complete: {filename}", wrap=True)
         _set_log_title(f"Export OK: {filename}")
         wm.progress_end()
         _show_log()
@@ -6320,8 +6315,9 @@ class Import4DS(bpy.types.Operator, ImportHelper):
     def execute(self, context):
         filename = os.path.basename(self.filepath)
 
-        log_clear(f"Importing: {filename}")
-        log_info(f"Importing {filename} ...")
+        log_clear()
+        log_separator()
+        log_info(f"Importing: {filename}", wrap=True)
 
         wm = context.window_manager
         wm.progress_begin(0, 100)
@@ -6344,8 +6340,7 @@ class Import4DS(bpy.types.Operator, ImportHelper):
                 obj.ls3d_frame_type = detect_initial_frame_type(obj)
             ls3d_update_viewport_display(obj)
 
-        log_separator()
-        log_success(f"Import complete: {filename}")
+        log_info(f"Import complete: {filename}", wrap=True)
         _set_log_title(f"Import OK: {filename}")
         wm.progress_end()
         _show_log()
