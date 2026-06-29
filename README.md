@@ -1,6 +1,8 @@
 # Mafia4Blender 4ds
 This addon aims to bring Mafia 4ds models into Blender 5!
 
+This addon has complete import and export support for 4ds version 29 (Mafia for PC).
+
 If you encounter any issue with this addon, please open an issue here on github.
 
 ## Facts about the project
